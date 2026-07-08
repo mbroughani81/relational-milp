@@ -229,6 +229,157 @@ def build_relu_gurobi_model(
     return model, x, z1, a1, z2, deltas
 
 
+def build_robustness_gurobi_model(
+    x0: Vector,
+    epsilon: float,
+    w1: Matrix,
+    b1: Vector,
+    w2: Matrix,
+    b2: Vector,
+    predicted_class: int,
+    target_class: int,
+) -> tuple[
+    gp.Model,
+    list[gp.Var],
+    list[gp.Var],
+    list[gp.Var],
+    list[gp.Var],
+    list[gp.Var],
+]:
+    model = gp.Model(f"toy_dnn_robustness_target_{target_class}")
+    model.Params.OutputFlag = 0
+
+    x_bounds: Bounds = [(x - epsilon, x + epsilon) for x in x0]
+    z1_bounds: Bounds = affine_bounds(w1, b1, x_bounds)
+
+    x = [
+        model.addVar(lb=lb, ub=ub, name=f"x_{i}") for i, (lb, ub) in enumerate(x_bounds)
+    ]
+    z1 = [
+        model.addVar(lb=lb, ub=ub, name=f"z1_{i}")
+        for i, (lb, ub) in enumerate(z1_bounds)
+    ]
+    # NEW heuristics: use upper bound of z1 as upper bound for a1
+    a1 = [
+        model.addVar(lb=0.0, ub=max(0.0, upper), name=f"a1_{i}")
+        for i, (_, upper) in enumerate(z1_bounds)
+    ]
+    z2 = [model.addVar(lb=-GRB.INFINITY, name=f"z2_{i}") for i in range(len(b2))]
+    add_affine_constraints(
+        model=model,
+        output_vars=z1,
+        weights=w1,
+        input_vars=x,
+        bias=b1,
+        layer_name="hidden_affine",
+    )
+
+    deltas = add_relu_big_m_constraints(
+        model=model,
+        z_vars=z1,
+        a_vars=a1,
+        z_bounds=z1_bounds,
+        layer_name="hidden",
+    )
+
+    add_affine_constraints(
+        model=model,
+        output_vars=z2,
+        weights=w2,
+        input_vars=a1,
+        bias=b2,
+        layer_name="output_affine",
+    )
+
+    model.addConstr(
+        z2[target_class] >= z2[predicted_class],
+        name=f"adversarial_target_{target_class}",
+    )
+
+    model.setObjective(0.0, GRB.MINIMIZE)
+
+    return model, x, z1, a1, z2, deltas
+
+
+def gurobi_status_name(status: int) -> str:
+    names = {
+        GRB.OPTIMAL: "optimal",
+        GRB.INFEASIBLE: "infeasible",
+        GRB.INF_OR_UNBD: "infeasible_or_unbounded",
+        GRB.UNBOUNDED: "unbounded",
+        GRB.TIME_LIMIT: "time_limit",
+    }
+    return names.get(status, f"unknown_status_{status}")
+
+
+def verify_robustness(
+    x0: Vector,
+    epsilon: float,
+    w1: Matrix,
+    b1: Vector,
+    w2: Matrix,
+    b2: Vector,
+    predicted_class: int,
+) -> bool:
+    verified_robust = True
+    num_classes = len(b2)
+
+    print()
+    print("Step 4: Robustness verification")
+    print("=" * 36)
+    print_vector("x0", x0)
+    print(f"epsilon: {epsilon}")
+    print(f"original predicted class: {predicted_class}")
+
+    for target_class in range(num_classes):
+        if target_class == predicted_class:
+            continue
+
+        model, x, z1, a1, z2, deltas = build_robustness_gurobi_model(
+            x0=x0,
+            epsilon=epsilon,
+            w1=w1,
+            b1=b1,
+            w2=w2,
+            b2=b2,
+            predicted_class=predicted_class,
+            target_class=target_class,
+        )
+
+        model.optimize()
+
+        print()
+        print(f"target class: {target_class}")
+        print(f"status: {gurobi_status_name(model.Status)}")
+        print(f"solve time: {model.Runtime:.6f}s")
+        print(
+            "number of binary variables: "
+            f"{sum(var.VType == GRB.BINARY for var in model.getVars())}"
+        )
+
+        if model.Status == GRB.OPTIMAL:
+            verified_robust = False
+
+            print("adversarial example exists: yes")
+            print_gurobi_solution("adversarial x", x)
+            print_gurobi_solution("z1", z1)
+            print_gurobi_solution("a1", a1)
+            print_gurobi_solution("z2 / class scores", z2)
+            print_gurobi_solution("ReLU binary deltas", deltas)
+
+        elif model.Status == GRB.INFEASIBLE:
+            print("adversarial example exists: no")
+
+        else:
+            verified_robust = False
+            print("warning: verification inconclusive for this target")
+
+    print()
+    print(f"verified robust: {'yes' if verified_robust else 'no'}")
+
+    return verified_robust
+
+
 def main() -> None:
     x_values: Vector = [0.5, -0.2]
     w1: Matrix = [[1.0, -1.0], [-0.5, 1], [0.75, 0.25]]
@@ -280,39 +431,53 @@ def main() -> None:
     # print_gurobi_solution("z2", z2)
 
     # print_constraints(model)
+
     # Step 3: encode affine layers plus ReLU using Big-M MILP.
-    model, x, z1, a1, z2, deltas = build_relu_gurobi_model(
-        x_values=x_values,
+    # model, x, z1, a1, z2, deltas = build_relu_gurobi_model(
+    #     x_values=x_values,
+    #     w1=w1,
+    #     b1=b1,
+    #     w2=w2,
+    #     b2=b2,
+    # )
+    # model.optimize()
+
+    # print()
+    # print("Gurobi result")
+    # print("-" * 36)
+    # print(f"status: {model.Status}")
+
+    # if model.Status != GRB.OPTIMAL:
+    #     return
+
+    # print()
+    # print("Gurobi ReLU Big-M solution")
+    # print("-" * 36)
+    # print_gurobi_solution("x", x)
+    # print_gurobi_solution("z1", z1)
+    # print_gurobi_solution("a1", a1)
+    # print_gurobi_solution("z2", z2)
+    # print_gurobi_solution("ReLU binary deltas", deltas)
+
+    # print()
+    # print(
+    #     f"number of binary variables: {sum(var.VType == GRB.BINARY for var in model.getVars())}"
+    # )
+    # print_constraints(model)
+
+    # Step 4: robustness
+    # epsilon = 0.32434
+    epsilon = 0.4
+
+    verify_robustness(
+        x0=x_values,
+        epsilon=epsilon,
         w1=w1,
         b1=b1,
         w2=w2,
         b2=b2,
+        predicted_class=predicted_class,
     )
-    model.optimize()
-
-    print()
-    print("Gurobi result")
-    print("-" * 36)
-    print(f"status: {model.Status}")
-
-    if model.Status != GRB.OPTIMAL:
-        return
-
-    print()
-    print("Gurobi ReLU Big-M solution")
-    print("-" * 36)
-    print_gurobi_solution("x", x)
-    print_gurobi_solution("z1", z1)
-    print_gurobi_solution("a1", a1)
-    print_gurobi_solution("z2", z2)
-    print_gurobi_solution("ReLU binary deltas", deltas)
-
-    print()
-    print(
-        f"number of binary variables: {sum(var.VType == GRB.BINARY for var in model.getVars())}"
-    )
-
-    print_constraints(model)
 
 
 if __name__ == "__main__":
