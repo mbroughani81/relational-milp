@@ -1,5 +1,6 @@
 Vector = list[float]
 Matrix = list[list[float]]
+Bounds = list[tuple[float, float]]
 LinearLayer = tuple[Matrix, Vector]
 NeuralNetwork = list[LinearLayer]
 JsonValue = str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
