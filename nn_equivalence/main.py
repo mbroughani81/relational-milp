@@ -11,12 +11,6 @@ def main() -> None:
     #     hidden_sizes=[32, 32],
     #     name="smoky"
     # )
-
-    # print("Generated DNN pair")
-    # print("=" * 36)
-    # print(f"first: {pair.first}")
-    # print(f"second: {pair.second}")
-
     # nn1: list[LinearLayer] = load_linear_layers(pair.first)
     # nn2: list[LinearLayer] = load_linear_layers(pair.second)
 
@@ -33,7 +27,9 @@ def main() -> None:
     # add nn constraints and vars
     x = encoder.add_input_variables(
         model,
-        input_size
+        input_size,
+        0.0,
+        1.0
     )
     _, _, nn1_output_vars, _ = encoder.add_hidden_variables(
         model,
