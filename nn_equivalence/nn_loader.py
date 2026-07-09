@@ -27,8 +27,8 @@ def load_linear_layers(path: Path) -> list[LinearLayer]:
     ]
 
 
-def load_nn_pair_1() -> tuple[NeuralNetwork, NeuralNetwork]:
-    nn1: list[LinearLayer] = [
+def load_toy_nn_1() -> NeuralNetwork:
+    return [
         (
             [[1.0, -0.5], [0.25, 0.75]],
             [0.10, -0.20],
@@ -43,6 +43,9 @@ def load_nn_pair_1() -> tuple[NeuralNetwork, NeuralNetwork]:
         ),
     ]
 
+
+def load_nn_pair_1() -> tuple[NeuralNetwork, NeuralNetwork]:
+    nn1 = load_toy_nn_1()
     nn2: list[LinearLayer] = [
         (
             [[1.02, -0.48], [0.24, 0.77]],
@@ -59,3 +62,8 @@ def load_nn_pair_1() -> tuple[NeuralNetwork, NeuralNetwork]:
     ]
 
     return nn1, nn2
+
+
+def load_nn_pair_2() -> tuple[NeuralNetwork, NeuralNetwork]:
+    nn = load_toy_nn_1()
+    return nn, nn

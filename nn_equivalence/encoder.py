@@ -1,6 +1,5 @@
 import gurobipy as gp
 
-
 from nn_equivalence.nn_types import Bounds, NeuralNetwork
 
 
@@ -87,6 +86,71 @@ def add_relu_big_m_constraints(
         model.addConstr(a <= upper * delta, name=f"{layer_name}_relu_{i}_a_le_U_active")
 
     return deltas
+
+
+def _big_m_for_lower_bound(
+    lower_bound: float,
+    threshold: float,
+    fallback_big_m: float,
+) -> float:
+    if lower_bound <= -gp.GRB.INFINITY / 2:
+        return fallback_big_m
+    return max(0.0, threshold - lower_bound)
+
+
+def add_output_distance_constraint(
+    model: gp.Model,
+    first_output_vars: list[gp.Var],
+    second_output_vars: list[gp.Var],
+    epsilon: float,
+    name_prefix: str = "output_distance",
+    fallback_big_m: float = 1_000_000.0,
+) -> list[gp.Var]:
+    if epsilon < 0:
+        raise ValueError("epsilon must be non-negative")
+    if len(first_output_vars) != len(second_output_vars):
+        raise ValueError("output variable lists must have the same length")
+
+    model.update()
+
+    selectors: list[gp.Var] = []
+    for i, (first_var, second_var) in enumerate(
+        zip(first_output_vars, second_output_vars)
+    ):
+        positive_selector = model.addVar(
+            vtype=gp.GRB.BINARY, name=f"{name_prefix}_{i}_positive"
+        )
+        negative_selector = model.addVar(
+            vtype=gp.GRB.BINARY, name=f"{name_prefix}_{i}_negative"
+        )
+        selectors.extend([positive_selector, negative_selector])
+
+        diff_lower = first_var.LB - second_var.UB
+        diff_upper = first_var.UB - second_var.LB
+        positive_big_m = _big_m_for_lower_bound(
+            diff_lower, epsilon, fallback_big_m
+        )
+        negative_big_m = _big_m_for_lower_bound(
+            -diff_upper, epsilon, fallback_big_m
+        )
+
+        model.addConstr(
+            first_var - second_var
+            >= epsilon - positive_big_m * (1 - positive_selector),
+            name=f"{name_prefix}_{i}_first_minus_second_ge_epsilon",
+        )
+        model.addConstr(
+            second_var - first_var
+            >= epsilon - negative_big_m * (1 - negative_selector),
+            name=f"{name_prefix}_{i}_second_minus_first_ge_epsilon",
+        )
+
+    model.addConstr(
+        gp.quicksum(selectors) >= 1,
+        name=f"{name_prefix}_at_least_one_coordinate",
+    )
+
+    return selectors
 
 
 def add_hidden_variables(
