@@ -27,7 +27,7 @@ def format_expected(result: BenchmarkResult) -> str:
 def print_results(results: list[BenchmarkResult]) -> None:
     print(
         "benchmark_id,status,expected,runtime_sec,vars,binaries,"
-        "constraints,num_relu,max_output_diff"
+        "constraints,num_relu,active_relu,inactive_relu,unstable_relu,max_output_diff"
     )
     for result in results:
         print(
@@ -39,6 +39,9 @@ def print_results(results: list[BenchmarkResult]) -> None:
             f"{result.num_binary_vars},"
             f"{result.num_constraints},"
             f"{result.num_relu},"
+            f"{result.num_active_relu},"
+            f"{result.num_inactive_relu},"
+            f"{result.num_unstable_relu},"
             f"{format_float(result.max_output_diff)}"
         )
 

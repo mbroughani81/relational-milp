@@ -43,6 +43,24 @@ class BenchmarkSuite:
 
 
 @dataclass(frozen=True)
+class ReluStats:
+    active: int = 0
+    inactive: int = 0
+    unstable: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.active + self.inactive + self.unstable
+
+    def __add__(self, other: "ReluStats") -> "ReluStats":
+        return ReluStats(
+            active=self.active + other.active,
+            inactive=self.inactive + other.inactive,
+            unstable=self.unstable + other.unstable,
+        )
+
+
+@dataclass(frozen=True)
 class BenchmarkResult:
     benchmark_id: str
     suite_name: str
@@ -53,6 +71,9 @@ class BenchmarkResult:
     output_dim: int
     num_layers: int
     num_relu: int
+    num_active_relu: int
+    num_inactive_relu: int
+    num_unstable_relu: int
     num_vars: int
     num_binary_vars: int
     num_constraints: int
@@ -101,14 +122,50 @@ def _add_input_variables(model: gp.Model, input_region: InputRegion) -> list[gp.
     ]
 
 
+def _relu_stats_from_bounds(bounds: Bounds) -> ReluStats:
+    active = 0
+    inactive = 0
+    unstable = 0
+
+    for lower, upper in bounds:
+        if lower >= 0:
+            active += 1
+        elif upper <= 0:
+            inactive += 1
+        else:
+            unstable += 1
+
+    return ReluStats(active=active, inactive=inactive, unstable=unstable)
+
+
+def _relu_stats_for_network(nn: NeuralNetwork, input_bounds: Bounds) -> ReluStats:
+    current_bounds = input_bounds
+    stats = ReluStats()
+
+    for layer_index, (weights, bias) in enumerate(nn, start=1):
+        z_bounds = encoder.affine_bounds(weights, bias, current_bounds)
+        if layer_index == len(nn):
+            break
+
+        stats += _relu_stats_from_bounds(z_bounds)
+        current_bounds = encoder.relu_bounds(z_bounds)
+
+    return stats
+
+
 def run_benchmark(benchmark: Benchmark) -> BenchmarkResult:
     _validate_benchmark(benchmark)
 
     model = gp.Model(benchmark.benchmark_id)
     model.Params.OutputFlag = 0
     model.Params.TimeLimit = benchmark.timeout_sec
+    model.Params.FeasibilityTol = 1e-9
+    model.Params.IntFeasTol = 1e-9
 
     input_bounds = benchmark.input_region.bounds()
+    relu_stats = _relu_stats_for_network(
+        benchmark.nn1, input_bounds
+    ) + _relu_stats_for_network(benchmark.nn2, input_bounds)
     x = _add_input_variables(model, benchmark.input_region)
     _, _, nn1_output_vars, nn1_deltas = encoder.add_hidden_variables(
         model,
@@ -154,8 +211,10 @@ def run_benchmark(benchmark: Benchmark) -> BenchmarkResult:
         input_dim=len(x),
         output_dim=len(nn1_output_vars),
         num_layers=len(benchmark.nn1),
-        num_relu=sum(len(bias) for _, bias in benchmark.nn1[:-1])
-        + sum(len(bias) for _, bias in benchmark.nn2[:-1]),
+        num_relu=relu_stats.total,
+        num_active_relu=relu_stats.active,
+        num_inactive_relu=relu_stats.inactive,
+        num_unstable_relu=relu_stats.unstable,
         num_vars=model.NumVars,
         num_binary_vars=model.NumBinVars,
         num_constraints=model.NumConstrs,

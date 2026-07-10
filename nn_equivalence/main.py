@@ -7,14 +7,14 @@ from nn_equivalence.nn_types import LinearLayer
 import nn_equivalence.encoder as encoder
 
 def main() -> None:
-    # pair = generate_dnn_pair(
-    #     hidden_sizes=[32, 32],
-    #     name="smoky"
-    # )
-    # nn1: list[LinearLayer] = load_linear_layers(pair.first)
-    # nn2: list[LinearLayer] = load_linear_layers(pair.second)
+    pair = generate_dnn_pair(
+        hidden_sizes=[64, 64],
+        name="smoky"
+    )
+    nn1: list[LinearLayer] = load_linear_layers(pair.first)
+    nn2: list[LinearLayer] = load_linear_layers(pair.second)
 
-    nn1, nn2 = load_nn_pair_1()
+    # nn1, nn2 = load_nn_pair_1()
     # nn1, nn2 = load_nn_pair_2()
 
     model = gp.Model("nn_eq")

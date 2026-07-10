@@ -88,23 +88,12 @@ def add_relu_big_m_constraints(
     return deltas
 
 
-def _big_m_for_lower_bound(
-    lower_bound: float,
-    threshold: float,
-    fallback_big_m: float,
-) -> float:
-    if lower_bound <= -gp.GRB.INFINITY / 2:
-        return fallback_big_m
-    return max(0.0, threshold - lower_bound)
-
-
 def add_output_distance_constraint(
     model: gp.Model,
     first_output_vars: list[gp.Var],
     second_output_vars: list[gp.Var],
     epsilon: float,
     name_prefix: str = "output_distance",
-    fallback_big_m: float = 1_000_000.0,
 ) -> list[gp.Var]:
     if epsilon < 0:
         raise ValueError("epsilon must be non-negative")
@@ -125,24 +114,17 @@ def add_output_distance_constraint(
         )
         selectors.extend([positive_selector, negative_selector])
 
-        diff_lower = first_var.LB - second_var.UB
-        diff_upper = first_var.UB - second_var.LB
-        positive_big_m = _big_m_for_lower_bound(
-            diff_lower, epsilon, fallback_big_m
+        model.addGenConstrIndicator(
+            positive_selector,
+            True,
+            first_var - second_var >= epsilon,
+            name=f"{name_prefix}_{i}_first_minus_second_indicator",
         )
-        negative_big_m = _big_m_for_lower_bound(
-            -diff_upper, epsilon, fallback_big_m
-        )
-
-        model.addConstr(
-            first_var - second_var
-            >= epsilon - positive_big_m * (1 - positive_selector),
-            name=f"{name_prefix}_{i}_first_minus_second_ge_epsilon",
-        )
-        model.addConstr(
-            second_var - first_var
-            >= epsilon - negative_big_m * (1 - negative_selector),
-            name=f"{name_prefix}_{i}_second_minus_first_ge_epsilon",
+        model.addGenConstrIndicator(
+            negative_selector,
+            True,
+            second_var - first_var >= epsilon,
+            name=f"{name_prefix}_{i}_second_minus_first_indicator",
         )
 
     model.addConstr(
