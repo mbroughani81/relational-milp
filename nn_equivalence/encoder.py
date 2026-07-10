@@ -160,10 +160,13 @@ def add_hidden_variables(
     name_prefix: str,
     input_lower_bound: float = -1,
     input_upper_bound: float = 1,
+    input_bounds: Bounds | None = None,
 ) -> tuple[list[list[gp.Var]], list[list[gp.Var]], list[gp.Var], list[gp.Var]]:
-    input_bounds: Bounds = [
-        (input_lower_bound, input_upper_bound) for _ in input_vars
-    ]
+    if input_bounds is None:
+        input_bounds = [(input_lower_bound, input_upper_bound) for _ in input_vars]
+    if len(input_bounds) != len(input_vars):
+        raise ValueError("input_bounds must have one bound pair per input variable")
+
     current_bounds = input_bounds
     pre_activation_vars: list[list[gp.Var]] = []
     activation_vars: list[list[gp.Var]] = []
