@@ -51,6 +51,10 @@ def architecture_id(architecture: list[int]) -> str:
     return "_".join(str(size) for size in architecture)
 
 
+def epsilon_id(epsilon: float) -> str:
+    return str(epsilon).replace(".", "p")
+
+
 def load_suite() -> BenchmarkSuite:
     region = InputRegion(
         lower_bounds=[-1.0, -1.0],
@@ -63,6 +67,7 @@ def load_suite() -> BenchmarkSuite:
         [2, 40, 40, 2],
         [2, 60, 60, 2],
     ]
+    noisy_epsilons = [0.001, 0.005, 0.01, 0.05, 0.1, 1]
 
     for case_index, architecture in enumerate(architectures, start=1):
         base = make_random_network(architecture, seed=100 + case_index)
@@ -82,31 +87,22 @@ def load_suite() -> BenchmarkSuite:
                 metadata={"pair_type": "identical", "architecture": arch_id},
             )
         )
-        benchmarks.append(
-            Benchmark(
-                benchmark_id=f"synthetic_noisy_{arch_id}_eps_001",
-                suite_name="synthetic",
-                nn1=base,
-                nn2=noisy,
-                input_region=region,
-                epsilon=0.001,
-                expected_status=None,
-                timeout_sec=10.0,
-                metadata={"pair_type": "noisy", "architecture": arch_id},
+
+        for epsilon in noisy_epsilons:
+            benchmarks.append(
+                Benchmark(
+                    benchmark_id=(
+                        f"synthetic_noisy_{arch_id}_eps_{epsilon_id(epsilon)}"
+                    ),
+                    suite_name="synthetic",
+                    nn1=base,
+                    nn2=noisy,
+                    input_region=region,
+                    epsilon=epsilon,
+                    expected_status=None,
+                    timeout_sec=10.0,
+                    metadata={"pair_type": "noisy", "architecture": arch_id},
+                )
             )
-        )
-        benchmarks.append(
-            Benchmark(
-                benchmark_id=f"synthetic_noisy_{arch_id}_eps_01",
-                suite_name="synthetic",
-                nn1=base,
-                nn2=noisy,
-                input_region=region,
-                epsilon=0.01,
-                expected_status=None,
-                timeout_sec=10.0,
-                metadata={"pair_type": "noisy", "architecture": arch_id},
-            )
-        )
 
     return BenchmarkSuite(name="synthetic", benchmarks=benchmarks)
