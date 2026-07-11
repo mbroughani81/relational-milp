@@ -117,13 +117,18 @@ def add_output_distance_constraint(
         model.addGenConstrIndicator(
             positive_selector,
             True,
-            first_var - second_var >= epsilon,
+            first_var - second_var,
+            gp.GRB.GREATER_EQUAL,
+            epsilon,
             name=f"{name_prefix}_{i}_first_minus_second_indicator",
         )
+
         model.addGenConstrIndicator(
             negative_selector,
             True,
-            second_var - first_var >= epsilon,
+            second_var - first_var,
+            gp.GRB.GREATER_EQUAL,
+            epsilon,
             name=f"{name_prefix}_{i}_second_minus_first_indicator",
         )
 
@@ -140,15 +145,8 @@ def add_hidden_variables(
     input_vars: list[gp.Var],
     nn: NeuralNetwork,
     name_prefix: str,
-    input_lower_bound: float = -1,
-    input_upper_bound: float = 1,
-    input_bounds: Bounds | None = None,
+    input_bounds: Bounds,
 ) -> tuple[list[list[gp.Var]], list[list[gp.Var]], list[gp.Var], list[gp.Var]]:
-    if input_bounds is None:
-        input_bounds = [(input_lower_bound, input_upper_bound) for _ in input_vars]
-    if len(input_bounds) != len(input_vars):
-        raise ValueError("input_bounds must have one bound pair per input variable")
-
     current_bounds = input_bounds
     pre_activation_vars: list[list[gp.Var]] = []
     activation_vars: list[list[gp.Var]] = []

@@ -30,14 +30,14 @@ def load_suite() -> BenchmarkSuite:
     data_dir = Path("data")
     benchmarks: list[Benchmark] = []
     input_radius = 0.03
-    output_epsilons = [0.01, 1.0, 5.0, 10, 20]
+    output_epsilons = [0.01, 10, 20, 100, 1000]
     timeout_sec = 10.0
     model_pairs = [
-        (
-            "32_32",
-            Path("models/nn_equivalence/smoky_32_32_seed0.pt"),
-            Path("models/nn_equivalence/smoky_32_32_seed1.pt"),
-        ),
+        # (
+        #     "32_32",
+        #     Path("models/nn_equivalence/smoky_32_32_seed0.pt"),
+        #     Path("models/nn_equivalence/smoky_32_32_seed1.pt"),
+        # ),
         (
             "64_64",
             Path("models/nn_equivalence/smoky_64_64_seed0.pt"),
