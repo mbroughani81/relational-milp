@@ -67,26 +67,30 @@ def load_suite() -> BenchmarkSuite:
         # [2, 40, 40, 2],
         [2, 60, 60, 2],
     ]
-    noisy_epsilons = [0.001, 0.01, 0.05, 0.1, 1, 20, 100, 1000]
+    identical_epsilons = [0.0001, 0.001, 0.01, 0.1]
+    noisy_epsilons = [0.01, 0.05, 0.1, 0.3, 0.4, 0.5, 0.6]
 
     for case_index, architecture in enumerate(architectures, start=1):
         base = make_random_network(architecture, seed=100 + case_index)
         noisy = perturb_network(base, seed=200 + case_index)
         arch_id = architecture_id(architecture)
 
-        benchmarks.append(
-            Benchmark(
-                benchmark_id=f"synthetic_identical_{arch_id}",
-                suite_name="synthetic",
-                nn1=base,
-                nn2=base,
-                input_region=region,
-                epsilon=0.001,
-                expected_status="unsat",
-                timeout_sec=10.0,
-                metadata={"pair_type": "identical", "architecture": arch_id},
+        for epsilon in identical_epsilons:
+            benchmarks.append(
+                Benchmark(
+                    benchmark_id=(
+                        f"synthetic_identical_{arch_id}_eps_{epsilon_id(epsilon)}"
+                    ),
+                    suite_name="synthetic",
+                    nn1=base,
+                    nn2=base,
+                    input_region=region,
+                    epsilon=epsilon,
+                    expected_status="unsat",
+                    timeout_sec=10.0,
+                    metadata={"pair_type": "identical", "architecture": arch_id},
+                )
             )
-        )
 
         for epsilon in noisy_epsilons:
             benchmarks.append(

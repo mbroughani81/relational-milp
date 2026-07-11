@@ -1,6 +1,7 @@
 data/
 models/
 plan.md
+artifacts/
 
 # Python bytecode and caches
 __pycache__/
