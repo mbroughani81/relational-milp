@@ -167,7 +167,22 @@ def write_manifest(path: Path, benchmarks: list[Benchmark], rows: list[tuple[Pat
     path.write_text("".join(lines), encoding="utf-8")
 
 
-def write_config(path: Path, work_dir: Path, results_path: Path) -> None:
+def suite_output_dim(benchmarks: list[Benchmark]) -> int:
+    output_dims = {len(benchmark.nn1[-1][1]) for benchmark in benchmarks}
+    if len(output_dims) != 1:
+        raise ValueError(
+            "alpha-beta-CROWN config requires one data.num_outputs value; "
+            f"got output dimensions {sorted(output_dims)}"
+        )
+    return output_dims.pop()
+
+
+def write_config(
+    path: Path,
+    work_dir: Path,
+    results_path: Path,
+    output_dim: int,
+) -> None:
     path.write_text(
         "\n".join(
             [
@@ -177,7 +192,7 @@ def write_config(path: Path, work_dir: Path, results_path: Path) -> None:
                 "  csv_name: instances.csv",
                 f"  results_file: {results_path}",
                 "data:",
-                "  num_outputs: 2",
+                f"  num_outputs: {output_dim}",
                 "solver:",
                 f"  batch_size: {BATCH_SIZE}",
                 "",
@@ -283,7 +298,12 @@ def prepare_artifacts(suite: BenchmarkSuite) -> tuple[Path, Path, list[Benchmark
     config_path = work_dir / "abcrown_config.yaml"
     write_instances_csv(instances_path, rows, work_dir)
     write_manifest(manifest_path, suite.benchmarks, rows, work_dir)
-    write_config(config_path, work_dir, work_dir / "abcrown_results.txt")
+    write_config(
+        config_path,
+        work_dir,
+        work_dir / "abcrown_results.txt",
+        suite_output_dim(suite.benchmarks),
+    )
     return work_dir, config_path, suite.benchmarks
 
 
