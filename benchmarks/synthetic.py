@@ -62,13 +62,13 @@ def load_suite() -> BenchmarkSuite:
     )
     benchmarks: list[Benchmark] = []
     architectures = [
-        # [2, 10, 10, 2],
+        [2, 10, 10, 2],
         # [2, 20, 20, 2],
         # [2, 40, 40, 2],
         [2, 60, 60, 2],
     ]
-    identical_epsilons = [0.0001, 0.001, 0.01, 0.1]
-    noisy_epsilons = [0.01, 0.05, 0.1, 0.3, 0.4, 0.5, 0.6]
+    identical_epsilons = [0.001]
+    noisy_epsilons = [0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
 
     for case_index, architecture in enumerate(architectures, start=1):
         base = make_random_network(architecture, seed=100 + case_index)

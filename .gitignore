@@ -2,6 +2,8 @@ data/
 models/
 plan.md
 artifacts/
+zip_git_visible.py
+*.zip
 
 # Python bytecode and caches
 __pycache__/

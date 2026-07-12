@@ -28,6 +28,72 @@ ABCROWN_DIR = Path(
 ARTIFACT_ROOT = Path("artifacts/abcrown_benchmarks")
 ONNX_OPSET = 18
 BATCH_SIZE = 2048
+ConfigValue = str | int | float | bool | dict[str, "ConfigValue"]
+ConfigDict = dict[str, ConfigValue]
+
+
+ABCROWN_PROFILES: dict[str, ConfigDict] = {
+    "default": {},
+    "beta_strong": {
+        "solver": {
+            "beta-crown": {
+                "iteration": 100,
+            },
+        },
+        "bab": {
+            "branching": {
+                "method": "kfsb",
+                "candidates": 5,
+            },
+        },
+    },
+    "attack_heavy": {
+        "attack": {
+            "pgd_order": "before",
+            "pgd_steps": 200,
+            "pgd_restarts": 100,
+        },
+    },
+    "alpha_strong": {
+        "solver": {
+            "alpha-crown": {
+                "iteration": 200,
+                "lr_alpha": 0.05,
+            },
+        },
+    },
+    "input_split": {
+        "bab": {
+            "branching": {
+                "input_split": {
+                    "enable": True,
+                },
+            },
+        },
+    },
+    "mip_small": {
+        "general": {
+            "complete_verifier": "mip",
+        },
+        "solver": {
+            "mip": {
+                "parallel_solvers": 4,
+                "solver_threads": 1,
+            },
+        },
+    },
+    "bab_refine": {
+        "general": {
+            "complete_verifier": "bab-refine",
+        },
+        "solver": {
+            "mip": {
+                "refine_neuron_timeout": 5,
+                "refine_neuron_time_percentage": 0.5,
+            },
+        },
+    },
+}
 
 
 class ReluNetwork(nn.Module):
@@ -71,6 +137,17 @@ def parse_args() -> argparse.Namespace:
         description="Run an NN equivalence benchmark suite with alpha-beta-CROWN."
     )
     parser.add_argument("--suite", default="sample")
+    parser.add_argument(
+        "--profile",
+        default="beta_strong",
+        choices=sorted(ABCROWN_PROFILES),
+        help="Named alpha-beta-CROWN configuration profile.",
+    )
+    parser.add_argument(
+        "--list-profiles",
+        action="store_true",
+        help="List available alpha-beta-CROWN profiles and exit.",
+    )
     return parser.parse_args()
 
 
@@ -177,29 +254,58 @@ def suite_output_dim(benchmarks: list[Benchmark]) -> int:
     return output_dims.pop()
 
 
+def merge_config(base: ConfigDict, override: ConfigDict) -> ConfigDict:
+    merged: ConfigDict = dict(base)
+    for key, value in override.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = merge_config(existing, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def yaml_scalar(value: ConfigValue) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def config_to_yaml(config: ConfigDict, indent: int = 0) -> list[str]:
+    lines: list[str] = []
+    prefix = " " * indent
+    for key, value in config.items():
+        if isinstance(value, dict):
+            lines.append(f"{prefix}{key}:")
+            lines.extend(config_to_yaml(value, indent + 2))
+        else:
+            lines.append(f"{prefix}{key}: {yaml_scalar(value)}")
+    return lines
+
+
 def write_config(
     path: Path,
     work_dir: Path,
     results_path: Path,
     output_dim: int,
+    profile: str,
 ) -> None:
-    path.write_text(
-        "\n".join(
-            [
-                "general:",
-                "  device: cpu",
-                f"  root_path: {work_dir}",
-                "  csv_name: instances.csv",
-                f"  results_file: {results_path}",
-                "data:",
-                f"  num_outputs: {output_dim}",
-                "solver:",
-                f"  batch_size: {BATCH_SIZE}",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    base_config: ConfigDict = {
+        "general": {
+            "device": "cpu",
+            "root_path": str(work_dir),
+            "csv_name": "instances.csv",
+            "results_file": str(results_path),
+        },
+        "data": {
+            "num_outputs": output_dim,
+        },
+        "solver": {
+            "batch_size": BATCH_SIZE,
+        },
+    }
+    config = merge_config(base_config, ABCROWN_PROFILES[profile])
+    path.write_text("\n".join(config_to_yaml(config)) + "\n", encoding="utf-8")
 
 
 def run_abcrown(config_path: Path) -> tuple[int, str]:
@@ -276,8 +382,11 @@ def print_results(results: list[BenchmarkResult], abcrown_statuses: list[str]) -
         )
 
 
-def prepare_artifacts(suite: BenchmarkSuite) -> tuple[Path, Path, list[Benchmark]]:
-    work_dir = (ARTIFACT_ROOT / suite.name).resolve()
+def prepare_artifacts(
+    suite: BenchmarkSuite,
+    profile: str,
+) -> tuple[Path, Path, list[Benchmark]]:
+    work_dir = (ARTIFACT_ROOT / suite.name / profile).resolve()
     model_dir = work_dir / "models"
     spec_dir = work_dir / "vnnlib"
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -303,6 +412,7 @@ def prepare_artifacts(suite: BenchmarkSuite) -> tuple[Path, Path, list[Benchmark
         work_dir,
         work_dir / "abcrown_results.txt",
         suite_output_dim(suite.benchmarks),
+        profile,
     )
     return work_dir, config_path, suite.benchmarks
 
@@ -353,8 +463,14 @@ def build_results(
 
 def main() -> None:
     args = parse_args()
+    if args.list_profiles:
+        print("profile")
+        for profile in sorted(ABCROWN_PROFILES):
+            print(profile)
+        return
+
     suite = load_suite(args.suite)
-    work_dir, config_path, benchmarks = prepare_artifacts(suite)
+    work_dir, config_path, benchmarks = prepare_artifacts(suite, args.profile)
     returncode, output = run_abcrown(config_path)
     if returncode != 0:
         print(output, end="")
@@ -364,6 +480,7 @@ def main() -> None:
 
     print()
     print(f"artifacts: {work_dir}")
+    print(f"profile: {args.profile}")
     print_results(results, abcrown_statuses)
     raise SystemExit(returncode)
 
