@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import importlib
+import io
 import json
-import os
 import re
-import subprocess
+import site
+import sys
+import traceback
 from pathlib import Path
 
 import torch
@@ -20,11 +23,10 @@ from benchmarks.common import (
     validate_benchmark,
 )
 from nn_equivalence.nn_types import NeuralNetwork
-
-
-ABCROWN_DIR = Path(
-    "/home/mbroughani81/Documents/research/nn-equivalence/alpha-beta-CROWN"
+from abcrown import (
+    run_all_instances
 )
+
 ARTIFACT_ROOT = Path("artifacts/abcrown_benchmarks")
 ONNX_OPSET = 18
 BATCH_SIZE = 2048
@@ -33,7 +35,11 @@ ConfigDict = dict[str, ConfigValue]
 
 
 ABCROWN_PROFILES: dict[str, ConfigDict] = {
-    "default": {},
+    "default": {
+        "bab": {
+            "timeout": 5
+        }
+    },
     "beta_strong": {
         "solver": {
             "beta-crown": {
@@ -172,14 +178,17 @@ def export_model_once(
     onnx_path = model_dir / f"diff_{key}.onnx"
     input_dim = len(benchmark.input_region.lower_bounds)
     model = DifferenceNetwork(benchmark.nn1, benchmark.nn2).eval()
-    torch.onnx.export(
-        model,
-        torch.zeros(1, input_dim),
-        onnx_path,
-        input_names=["input"],
-        output_names=["diff"],
-        opset_version=ONNX_OPSET,
-    )
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
+        io.StringIO()
+    ):
+        torch.onnx.export(
+            model,
+            torch.zeros(1, input_dim),
+            onnx_path,
+            input_names=["input"],
+            output_names=["diff"],
+            opset_version=ONNX_OPSET,
+        )
     exported_models[key] = onnx_path
     return onnx_path
 
@@ -296,6 +305,7 @@ def write_config(
             "root_path": str(work_dir),
             "csv_name": "instances.csv",
             "results_file": str(results_path),
+            "timeout": 10
         },
         "data": {
             "num_outputs": output_dim,
@@ -307,55 +317,25 @@ def write_config(
     config = merge_config(base_config, ABCROWN_PROFILES[profile])
     path.write_text("\n".join(config_to_yaml(config)) + "\n", encoding="utf-8")
 
-
-def run_abcrown(config_path: Path) -> tuple[int, str]:
-    python_path = ABCROWN_DIR / ".venv" / "bin" / "python"
-    abcrown_path = ABCROWN_DIR / "complete_verifier" / "abcrown.py"
-    if not python_path.exists():
-        raise FileNotFoundError(f"alpha-beta-CROWN venv Python not found: {python_path}")
-    if not abcrown_path.exists():
-        raise FileNotFoundError(f"abcrown.py not found: {abcrown_path}")
-
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(ABCROWN_DIR)
-    command = [str(python_path), str(abcrown_path), "--config", str(config_path)]
-    completed = subprocess.run(
-        command,
-        cwd=ABCROWN_DIR / "complete_verifier",
-        env=env,
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-    output = completed.stdout + completed.stderr
-    return completed.returncode, output
-
-
-def parse_abcrown_results(output: str) -> dict[int, tuple[str, float]]:
+def run_abcrown(config_path: Path) -> tuple[int, str, dict[int, tuple[str, float]]]:
+    captured = io.StringIO()
     results: dict[int, tuple[str, float]] = {}
-    current_index: int | None = None
+    try:
+        with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
+            for index, _, solve_result in run_all_instances(str(config_path)):
+                runtime = float(solve_result.stats.get("elapsed") or 0.0)
+                results[index] = (solve_result.status, runtime)
+    except Exception:
+        output = captured.getvalue() + traceback.format_exc()
+        return 1, output, {}
 
-    for line in output.splitlines():
-        index_match = re.search(r"idx:\s*(\d+)", line)
-        if index_match:
-            current_index = int(index_match.group(1))
-            continue
-
-        result_match = re.search(
-            r"Result:\s*([A-Za-z0-9_-]+)(?:\s+in\s+([0-9.]+)\s+seconds)?",
-            line,
-        )
-        if result_match and current_index is not None:
-            runtime = float(result_match.group(2) or 0.0)
-            results[current_index] = (result_match.group(1), runtime)
-
-    return results
+    return 0, captured.getvalue(), results
 
 
 def benchmark_status_from_abcrown(status: str | None) -> BenchmarkStatus:
-    if status in {"safe", "safe-incomplete", "unsat"}:
+    if status in {"safe", "safe-incomplete", "unsat", "verified"}:
         return "unsat"
-    if status in {"unsafe-pgd", "unsafe-bab", "sat"}:
+    if status in {"unsafe-pgd", "unsafe-bab", "sat", "falsified"}:
         return "sat"
     if status == "timeout":
         return "timeout"
@@ -471,11 +451,10 @@ def main() -> None:
 
     suite = load_suite(args.suite)
     work_dir, config_path, benchmarks = prepare_artifacts(suite, args.profile)
-    returncode, output = run_abcrown(config_path)
+    returncode, output, abcrown_result_by_index = run_abcrown(config_path)
     if returncode != 0:
         print(output, end="")
 
-    abcrown_result_by_index = parse_abcrown_results(output)
     results, abcrown_statuses = build_results(benchmarks, abcrown_result_by_index)
 
     print()
