@@ -35,15 +35,60 @@ ConfigDict = dict[str, ConfigValue]
 
 
 ABCROWN_PROFILES: dict[str, ConfigDict] = {
+    # Full alpha-beta-CROWN pipeline: alpha-CROWN first, then beta-CROWN BaB.
     "default": {
+    },
+
+    # Incomplete baselines. They can prove safety, but return unknown when
+    # their relaxation is not strong enough.
+    "crown_only": {
+        "general": {
+            "complete_verifier": "skip",
+            "enable_incomplete_verification": True,
+        },
+        "solver": {
+            "bound_prop_method": "crown",
+        },
+    },
+    "alpha_only": {
+        "general": {
+            "complete_verifier": "skip",
+            "enable_incomplete_verification": True,
+        },
+        "solver": {
+            "bound_prop_method": "alpha-crown",
+            "alpha-crown": {
+                "iteration": 100,
+                "lr_alpha": 0.1,
+            },
+        },
+    },
+
+    # Complete beta-CROWN variants with different optimization budgets.
+    "beta_fast": {
+        "solver": {
+            "alpha-crown": {
+                "iteration": 50,
+            },
+            "beta-crown": {
+                "iteration": 10,
+            },
+        },
         "bab": {
-            "timeout": 5
-        }
+            "branching": {
+                "method": "babsr",
+            },
+        },
     },
     "beta_strong": {
         "solver": {
+            "alpha-crown": {
+                "iteration": 200,
+                "lr_decay": 0.99,
+            },
             "beta-crown": {
                 "iteration": 100,
+                "lr_decay": 0.99,
             },
         },
         "bab": {
@@ -53,6 +98,38 @@ ABCROWN_PROFILES: dict[str, ConfigDict] = {
             },
         },
     },
+    "bab_no_incomplete": {
+        "general": {
+            "enable_incomplete_verification": False,
+        },
+    },
+
+    # Branching-heuristic comparison. Keep every other setting unchanged.
+    "branch_babsr": {
+        "bab": {
+            "branching": {
+                "method": "babsr",
+            },
+        },
+    },
+    "branch_kfsb": {
+        "bab": {
+            "branching": {
+                "method": "kfsb",
+                "candidates": 3,
+            },
+        },
+    },
+    "branch_fsb": {
+        "bab": {
+            "branching": {
+                "method": "fsb",
+                "candidates": 3,
+            },
+        },
+    },
+
+    # Counterexample search before formal verification.
     "attack_heavy": {
         "attack": {
             "pgd_order": "before",
@@ -60,46 +137,55 @@ ABCROWN_PROFILES: dict[str, ConfigDict] = {
             "pgd_restarts": 100,
         },
     },
-    "alpha_strong": {
-        "solver": {
-            "alpha-crown": {
-                "iteration": 200,
-                "lr_alpha": 0.05,
-            },
-        },
-    },
+
+    # Branch over the input box instead of unstable ReLU phases.
     "input_split": {
+        "solver": {
+            "bound_prop_method": "crown",
+        },
         "bab": {
             "branching": {
+                "method": "sb",
                 "input_split": {
                     "enable": True,
                 },
             },
         },
     },
+
+    # Exact MIP baseline for small networks. Requires Gurobi (or change to SCIP).
     "mip_small": {
         "general": {
             "complete_verifier": "mip",
+            "enable_incomplete_verification": False,
         },
         "solver": {
             "mip": {
+                "mip_solver": "gurobi",
+                "formulation": "mip",
                 "parallel_solvers": 4,
                 "solver_threads": 1,
             },
         },
     },
+
+    # Hybrid: MIP tightens intermediate bounds, then beta-CROWN BaB runs.
     "bab_refine": {
         "general": {
             "complete_verifier": "bab-refine",
         },
         "solver": {
             "mip": {
+                "mip_solver": "gurobi",
+                "parallel_solvers": 4,
+                "solver_threads": 1,
                 "refine_neuron_timeout": 5,
                 "refine_neuron_time_percentage": 0.5,
             },
         },
     },
 }
+
 
 
 class ReluNetwork(nn.Module):
@@ -304,8 +390,7 @@ def write_config(
             "device": "cpu",
             "root_path": str(work_dir),
             "csv_name": "instances.csv",
-            "results_file": str(results_path),
-            "timeout": 10
+            "results_file": str(results_path)
         },
         "data": {
             "num_outputs": output_dim,
@@ -313,8 +398,13 @@ def write_config(
         "solver": {
             "batch_size": BATCH_SIZE,
         },
+        "bab": {
+            "timeout": 5
+        }
     }
     config = merge_config(base_config, ABCROWN_PROFILES[profile])
+    print("config => ")
+    print(config)
     path.write_text("\n".join(config_to_yaml(config)) + "\n", encoding="utf-8")
 
 def run_abcrown(config_path: Path) -> tuple[int, str, dict[int, tuple[str, float]]]:
