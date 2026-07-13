@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from dataclasses import replace
 import hashlib
 import importlib
 import io
@@ -23,10 +24,6 @@ from benchmarks.common import (
     validate_benchmark,
 )
 from nn_equivalence.nn_types import NeuralNetwork
-from abcrown import (
-    run_all_instances
-)
-
 ARTIFACT_ROOT = Path("artifacts/abcrown_benchmarks")
 ONNX_OPSET = 18
 BATCH_SIZE = 2048
@@ -76,7 +73,8 @@ ABCROWN_PROFILES: dict[str, ConfigDict] = {
         },
         "bab": {
             "branching": {
-                "method": "babsr",
+                "method": "kfsb",
+                "candidates": 1,
             },
         },
     },
@@ -240,6 +238,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="List available alpha-beta-CROWN profiles and exit.",
     )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help=(
+            "Override every benchmark.timeout_sec before generating CROWN configs. "
+            "Without this, each suite benchmark controls its own bab.timeout."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -384,10 +391,15 @@ def write_config(
     results_path: Path,
     output_dim: int,
     profile: str,
+    timeout_sec: float,
 ) -> None:
+    if timeout_sec <= 0:
+        raise ValueError("timeout_sec must be positive")
+
     base_config: ConfigDict = {
         "general": {
             "device": "cpu",
+            "complete_verifier": "bab",
             "root_path": str(work_dir),
             "csv_name": "instances.csv",
             "results_file": str(results_path)
@@ -399,20 +411,41 @@ def write_config(
             "batch_size": BATCH_SIZE,
         },
         "bab": {
-            "timeout": 5
+            "timeout": timeout_sec
         }
     }
     config = merge_config(base_config, ABCROWN_PROFILES[profile])
-    print("config => ")
-    print(config)
+    config.setdefault("bab", {})["timeout"] = timeout_sec
+    print("config => ", file=sys.stderr)
+    print(config, file=sys.stderr)
     path.write_text("\n".join(config_to_yaml(config)) + "\n", encoding="utf-8")
 
-def run_abcrown(config_path: Path) -> tuple[int, str, dict[int, tuple[str, float]]]:
+def run_abcrown(
+    config_path: Path,
+    benchmarks: list[Benchmark],
+    profile: str,
+) -> tuple[int, str, dict[int, tuple[str, float]]]:
     captured = io.StringIO()
     results: dict[int, tuple[str, float]] = {}
     try:
         with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-            for index, _, solve_result in run_all_instances(str(config_path)):
+            from abcrown import run_specific_instance
+
+            output_dim = suite_output_dim(benchmarks)
+            work_dir = config_path.parent
+            for index, benchmark in enumerate(benchmarks):
+                instance_config_path = work_dir / f"abcrown_config_instance_{index}.yaml"
+                write_config(
+                    instance_config_path,
+                    work_dir,
+                    work_dir / f"abcrown_results_{index}.txt",
+                    output_dim,
+                    profile,
+                    benchmark.timeout_sec,
+                )
+                _, _, solve_result = run_specific_instance(
+                    str(instance_config_path), index
+                )
                 runtime = float(solve_result.stats.get("elapsed") or 0.0)
                 results[index] = (solve_result.status, runtime)
     except Exception:
@@ -483,8 +516,26 @@ def prepare_artifacts(
         work_dir / "abcrown_results.txt",
         suite_output_dim(suite.benchmarks),
         profile,
+        max(benchmark.timeout_sec for benchmark in suite.benchmarks),
     )
     return work_dir, config_path, suite.benchmarks
+
+
+def apply_timeout_override(
+    suite: BenchmarkSuite,
+    timeout_sec: float | None,
+) -> BenchmarkSuite:
+    if timeout_sec is None:
+        return suite
+    if timeout_sec <= 0:
+        raise ValueError("--timeout must be positive")
+    return BenchmarkSuite(
+        name=suite.name,
+        benchmarks=[
+            replace(benchmark, timeout_sec=timeout_sec)
+            for benchmark in suite.benchmarks
+        ],
+    )
 
 
 def build_results(
@@ -539,17 +590,19 @@ def main() -> None:
             print(profile)
         return
 
-    suite = load_suite(args.suite)
+    suite = apply_timeout_override(load_suite(args.suite), args.timeout)
     work_dir, config_path, benchmarks = prepare_artifacts(suite, args.profile)
-    returncode, output, abcrown_result_by_index = run_abcrown(config_path)
+    returncode, output, abcrown_result_by_index = run_abcrown(
+        config_path, benchmarks, args.profile
+    )
     if returncode != 0:
         print(output, end="")
 
     results, abcrown_statuses = build_results(benchmarks, abcrown_result_by_index)
 
-    print()
-    print(f"artifacts: {work_dir}")
-    print(f"profile: {args.profile}")
+    print(file=sys.stderr)
+    print(f"artifacts: {work_dir}", file=sys.stderr)
+    print(f"profile: {args.profile}", file=sys.stderr)
     print_results(results, abcrown_statuses)
     raise SystemExit(returncode)
 
