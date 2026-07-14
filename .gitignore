@@ -31,3 +31,4 @@ env/
 *.mps
 *.sol
 *.log
+*.csv

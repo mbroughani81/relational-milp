@@ -13,20 +13,14 @@ from nn_equivalence.reludiff_nnet import (
 from nn_equivalence.nn_types import NeuralNetwork
 
 SUITE_NAME = "mnist_reludiff"
-DEFAULT_DATA_DIR = Path("data/reludiff_mnist")
 DEFAULT_EPSILON = 1.0
 DEFAULT_PERTURB = 3.0
-DEFAULT_TIMEOUT_SEC = 30.0
+DEFAULT_TIMEOUT_SEC = 300
 
-
-def _data_dir() -> Path:
-    return Path(os.environ.get("MNIST_RELUDIFF_DATA_DIR", DEFAULT_DATA_DIR))
-
-
-def _csv_env(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+def get_env_tuple(name: str) -> tuple[str, ...]:
     value = os.environ.get(name)
     if not value:
-        return default
+        return tuple()
     return tuple(part.strip() for part in value.split(",") if part.strip())
 
 
@@ -62,7 +56,7 @@ def _three_pixel_region(raw_pixels: list[float], pixel_ids: list[int]) -> InputR
 
 def _load_network_pairs(data_dir: Path) -> dict[str, tuple[NeuralNetwork, NeuralNetwork]]:
     pairs: dict[str, tuple[NeuralNetwork, NeuralNetwork]] = {}
-    for network_name in _csv_env("MNIST_RELUDIFF_NETWORKS", MNIST_RELUDIFF_NETWORKS):
+    for network_name in get_env_tuple("MNIST_RELUDIFF_NETWORKS"):
         if network_name not in MNIST_RELUDIFF_NETWORKS:
             raise ValueError(f"unknown ReluDiff MNIST network: {network_name}")
         original = load_nnet_layers(data_dir / f"{network_name}.nnet")
@@ -83,13 +77,14 @@ def _require_data(data_dir: Path) -> None:
 
 
 def load_suite() -> BenchmarkSuite:
-    data_dir = _data_dir()
+    data_dir = Path("data/reludiff_mnist")
     _require_data(data_dir)
 
     mnist_tests, labels, random_pixels = load_reludiff_mnist_tests(
         data_dir / "mnist_tests.h"
     )
-    modes = _csv_env("MNIST_RELUDIFF_MODES", ("global", "three_pixel"))
+
+    modes = get_env_tuple("MNIST_RELUDIFF_MODES")
     unknown_modes = set(modes) - {"global", "three_pixel"}
     if unknown_modes:
         raise ValueError(f"unknown MNIST_RELUDIFF_MODES entries: {sorted(unknown_modes)}")
@@ -115,10 +110,9 @@ def load_suite() -> BenchmarkSuite:
                         str(pixel_id) for pixel_id in random_pixels[sample_index][:3]
                     )
 
-                property_id = 400 + sample_index
                 benchmarks.append(
                     Benchmark(
-                        benchmark_id=f"{network_name}_{mode}_property_{property_id}",
+                        benchmark_id=f"{network_name}_{mode}_{sample_index}",
                         suite_name=SUITE_NAME,
                         nn1=original,
                         nn2=quantized,
@@ -128,7 +122,6 @@ def load_suite() -> BenchmarkSuite:
                         timeout_sec=timeout_sec,
                         metadata={
                             "network": network_name,
-                            "property_id": property_id,
                             "sample_index": sample_index,
                             "correct_class": labels[sample_index],
                             "input_mode": mode,

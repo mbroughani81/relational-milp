@@ -8,10 +8,13 @@ import importlib
 import io
 import json
 import re
-import site
 import sys
 import traceback
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
 from torch import nn
@@ -101,7 +104,6 @@ ABCROWN_PROFILES: dict[str, ConfigDict] = {
             "enable_incomplete_verification": False,
         },
     },
-
     # Branching-heuristic comparison. Keep every other setting unchanged.
     "branch_babsr": {
         "bab": {
@@ -420,31 +422,50 @@ def write_config(
     print(config, file=sys.stderr)
     path.write_text("\n".join(config_to_yaml(config)) + "\n", encoding="utf-8")
 
+
 def run_abcrown(
     config_path: Path,
     benchmarks: list[Benchmark],
+    rows: list[tuple[Path, Path, float]],
     profile: str,
 ) -> tuple[int, str, dict[int, tuple[str, float]]]:
     captured = io.StringIO()
     results: dict[int, tuple[str, float]] = {}
     try:
         with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-            from abcrown import run_specific_instance
+            from abcrown import ABCrownSolver, ConfigBuilder, IOConstraints
 
+            if len(rows) != len(benchmarks):
+                raise ValueError(
+                    f"artifact row count ({len(rows)}) does not match benchmark "
+                    f"count ({len(benchmarks)})"
+                )
             output_dim = suite_output_dim(benchmarks)
             work_dir = config_path.parent
-            for index, benchmark in enumerate(benchmarks):
+            for index, (benchmark, (onnx_path, vnnlib_path, _)) in enumerate(
+                zip(benchmarks, rows)
+            ):
                 instance_config_path = work_dir / f"abcrown_config_instance_{index}.yaml"
+                instance_results_path = work_dir / f"abcrown_results_{index}.txt"
                 write_config(
                     instance_config_path,
                     work_dir,
-                    work_dir / f"abcrown_results_{index}.txt",
+                    instance_results_path,
                     output_dim,
                     profile,
                     benchmark.timeout_sec,
                 )
-                _, _, solve_result = run_specific_instance(
-                    str(instance_config_path), index
+                config = ConfigBuilder.from_yaml(str(instance_config_path)).to_dict()
+                solve_result = ABCrownSolver(
+                    str(onnx_path),
+                    constraint=IOConstraints(vnnlib_path=str(vnnlib_path)),
+                    config=config,
+                    name=f"{benchmark.suite_name}/{benchmark.benchmark_id}",
+                ).verify()
+                instance_results_path.write_text(
+                    f"{index},{solve_result.status},{solve_result.success},"
+                    f"{float(solve_result.stats.get('elapsed') or 0.0):.6f}\n",
+                    encoding="utf-8",
                 )
                 runtime = float(solve_result.stats.get("elapsed") or 0.0)
                 results[index] = (solve_result.status, runtime)
@@ -488,7 +509,7 @@ def print_results(results: list[BenchmarkResult], abcrown_statuses: list[str]) -
 def prepare_artifacts(
     suite: BenchmarkSuite,
     profile: str,
-) -> tuple[Path, Path, list[Benchmark]]:
+) -> tuple[Path, Path, list[Benchmark], list[tuple[Path, Path, float]]]:
     work_dir = (ARTIFACT_ROOT / suite.name / profile).resolve()
     model_dir = work_dir / "models"
     spec_dir = work_dir / "vnnlib"
@@ -518,7 +539,7 @@ def prepare_artifacts(
         profile,
         max(benchmark.timeout_sec for benchmark in suite.benchmarks),
     )
-    return work_dir, config_path, suite.benchmarks
+    return work_dir, config_path, suite.benchmarks, rows
 
 
 def apply_timeout_override(
@@ -591,9 +612,9 @@ def main() -> None:
         return
 
     suite = apply_timeout_override(load_suite(args.suite), args.timeout)
-    work_dir, config_path, benchmarks = prepare_artifacts(suite, args.profile)
+    work_dir, config_path, benchmarks, rows = prepare_artifacts(suite, args.profile)
     returncode, output, abcrown_result_by_index = run_abcrown(
-        config_path, benchmarks, args.profile
+        config_path, benchmarks, rows, args.profile
     )
     if returncode != 0:
         print(output, end="")
