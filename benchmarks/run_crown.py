@@ -104,6 +104,22 @@ ABCROWN_PROFILES: dict[str, ConfigDict] = {
             "enable_incomplete_verification": False,
         },
     },
+    "clip_and_verify": {
+        "bab": {
+            "clip_n_verify": {
+                "clip_input_domain": {
+                    "enabled": True,
+                    "clip_type": "relaxed",
+                    "clip_iterations": 1,
+                },
+                "clip_interm_domain": {
+                    "enabled": True,
+                    "with_input": True,
+                    "topk_objective": 20,
+                },
+            },
+        },
+    },
     # Branching-heuristic comparison. Keep every other setting unchanged.
     "branch_babsr": {
         "bab": {
@@ -423,6 +439,22 @@ def write_config(
     path.write_text("\n".join(config_to_yaml(config)) + "\n", encoding="utf-8")
 
 
+def prepare_profile_runtime(profile: str) -> None:
+    if profile != "clip_and_verify":
+        return
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "clip_and_verify currently requires CUDA in this alpha-beta-CROWN "
+            "checkout. Its intermediate clipping path calls torch.cuda APIs even "
+            "when general.device is cpu."
+        )
+
+    import beta_CROWN_solver
+    from auto_LiRPA.perturbations import PerturbationLpNorm
+
+    beta_CROWN_solver.PerturbationLpNorm = PerturbationLpNorm
+
+
 def run_abcrown(
     config_path: Path,
     benchmarks: list[Benchmark],
@@ -435,6 +467,7 @@ def run_abcrown(
         with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
             from abcrown import ABCrownSolver, ConfigBuilder, IOConstraints
 
+            prepare_profile_runtime(profile)
             if len(rows) != len(benchmarks):
                 raise ValueError(
                     f"artifact row count ({len(rows)}) does not match benchmark "
