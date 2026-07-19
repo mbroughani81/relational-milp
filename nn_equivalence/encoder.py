@@ -1,4 +1,5 @@
 import gurobipy as gp
+from gurobipy import GRB
 
 from nn_equivalence.nn_types import Bounds, NeuralNetwork
 
@@ -93,12 +94,33 @@ def add_output_distance_constraint(
     first_output_vars: list[gp.Var],
     second_output_vars: list[gp.Var],
     epsilon: float,
-    name_prefix: str = "output_distance",
+    name_prefix: str,
 ) -> None:
-    if epsilon < 0:
-        raise ValueError("epsilon must be non-negative")
     if len(first_output_vars) != len(second_output_vars):
         raise ValueError("output variable lists must have the same length")
+
+    selectors: list[gp.Var] = []
+    for output_index, (first_var, second_var) in enumerate(
+        zip(first_output_vars, second_output_vars)
+    ):
+        selector = model.addVar(
+            vtype=GRB.BINARY,
+            name=f"{name_prefix}_{output_index}",
+        )
+        selectors.append(selector)
+        model.addGenConstrIndicator(
+            selector,
+            True,
+            first_var - second_var,
+            GRB.GREATER_EQUAL,
+            epsilon,
+            name=f"{name_prefix}_{output_index}_indicator",
+        )
+
+    model.addConstr(
+        gp.quicksum(selectors) >= 1,
+        name=f"{name_prefix}_at_least_one_coordinate",
+    )
 
 
 

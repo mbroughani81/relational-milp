@@ -7,6 +7,7 @@ from gurobipy import GRB
 
 from benchmarks.common import Instance, InstanceSuite, InstanceResult, InstanceStatus, InputRegion, validate_instance
 import nn_equivalence.encoder as encoder
+from nn_equivalence.nn_types import NeuralNetwork
 
 def load_suite(name: str) -> InstanceSuite:
     module = importlib.import_module(f"benchmarks.{name}")
@@ -47,10 +48,50 @@ def _status_from_gurobi(status: int) -> InstanceStatus:
     return "unknown"
 
 
-def run_instance(instance: Instance) -> InstanceResult:
-    validate_instance(instance)
+def _add_directional_output_distance_constraint(
+    model: gp.Model,
+    first_output_vars: list[gp.Var],
+    second_output_vars: list[gp.Var],
+    epsilon: float,
+    name_prefix: str,
+) -> None:
+    if len(first_output_vars) != len(second_output_vars):
+        raise ValueError("output variable lists must have the same length")
 
-    model = gp.Model(instance.instance_id)
+    selectors: list[gp.Var] = []
+    for output_index, (first_var, second_var) in enumerate(
+        zip(first_output_vars, second_output_vars)
+    ):
+        selector = model.addVar(
+            vtype=GRB.BINARY,
+            name=f"{name_prefix}_{output_index}",
+        )
+        selectors.append(selector)
+        model.addGenConstrIndicator(
+            selector,
+            True,
+            first_var - second_var,
+            GRB.GREATER_EQUAL,
+            epsilon,
+            name=f"{name_prefix}_{output_index}_indicator",
+        )
+
+    model.addConstr(
+        gp.quicksum(selectors) >= 1,
+        name=f"{name_prefix}_at_least_one_coordinate",
+    )
+
+
+def solve_differential_model(
+    instance: Instance,
+    first_network_name: str,
+    second_network_name: str,
+    first_network: NeuralNetwork,
+    second_network: NeuralNetwork,
+) -> tuple[InstanceStatus, float]:
+    model = gp.Model(
+        f"{instance.instance_id}_{first_network_name}_minus_{second_network_name}"
+    )
     model.Params.OutputFlag = 0
     model.Params.TimeLimit = instance.timeout_sec
     model.Params.FeasibilityTol = 1e-9
@@ -62,36 +103,67 @@ def run_instance(instance: Instance) -> InstanceResult:
         for i, (lower, upper) in enumerate(input_bounds)
     ]
 
-    nn1_output_vars = encoder.add_hidden_variables(
+    first_output_vars = encoder.add_hidden_variables(
         model,
         x,
-        instance.nn1,
-        "nn1",
+        first_network,
+        first_network_name,
         input_bounds=input_bounds,
     )
-    nn2_output_vars = encoder.add_hidden_variables(
+    second_output_vars = encoder.add_hidden_variables(
         model,
         x,
-        instance.nn2,
-        "nn2",
+        second_network,
+        second_network_name,
         input_bounds=input_bounds,
     )
     encoder.add_output_distance_constraint(
         model,
-        nn1_output_vars,
-        nn2_output_vars,
+        first_output_vars,
+        second_output_vars,
         instance.epsilon,
+        name_prefix=f"{first_network_name}_minus_{second_network_name}",
     )
     model.setObjective(0.0, GRB.MINIMIZE)
     model.optimize()
 
-    status = _status_from_gurobi(model.Status)
+    return _status_from_gurobi(model.Status), model.Runtime
+
+
+def _combine_directional_statuses(statuses: list[InstanceStatus]) -> InstanceStatus:
+    if "sat" in statuses:
+        return "sat"
+    if all(status == "unsat" for status in statuses):
+        return "unsat"
+    if "timeout" in statuses:
+        return "timeout"
+    return "unknown"
+
+
+def run_instance(instance: Instance) -> InstanceResult:
+    validate_instance(instance)
+
+    first_status, first_runtime = solve_differential_model(
+        instance,
+        "nn1",
+        "nn2",
+        instance.nn1,
+        instance.nn2,
+    )
+    second_status, second_runtime = solve_differential_model(
+        instance,
+        "nn2",
+        "nn1",
+        instance.nn2,
+        instance.nn1,
+    )
+    status = _combine_directional_statuses([first_status, second_status])
 
     return InstanceResult(
         instance_id=instance.instance_id,
         suite_name=instance.suite_name,
         status=status,
-        runtime_sec=model.Runtime,
+        runtime_sec=first_runtime + second_runtime,
         epsilon=instance.epsilon,
         expected_status=instance.expected_status,
     )
