@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from benchmarks.common import Benchmark, BenchmarkSuite, InputRegion
+from benchmarks.common import Instance, InstanceSuite, InputRegion
 from nn_equivalence.reludiff_nnet import (
     MNIST_RELUDIFF_NETWORKS,
     load_nnet_layers,
@@ -70,13 +70,13 @@ def _require_data(data_dir: Path) -> None:
     missing = [path for path in required if not path.exists()]
     if missing:
         raise FileNotFoundError(
-            "missing ReluDiff MNIST benchmark data; run "
+            "missing ReluDiff MNIST instance data; run "
             "`python3 scripts/download_mnist_reludiff_nnets.py` first. Missing: "
             + ", ".join(str(path) for path in missing)
         )
 
 
-def load_suite() -> BenchmarkSuite:
+def load_suite() -> InstanceSuite:
     data_dir = Path("data/reludiff_mnist")
     _require_data(data_dir)
 
@@ -94,7 +94,7 @@ def load_suite() -> BenchmarkSuite:
     timeout_sec = _timeout()
     network_pairs = _load_network_pairs(data_dir)
 
-    benchmarks: list[Benchmark] = []
+    instances: list[Instance] = []
     for network_name, (original, quantized) in network_pairs.items():
         for mode in modes:
             for sample_index in sample_indices:
@@ -110,9 +110,9 @@ def load_suite() -> BenchmarkSuite:
                         str(pixel_id) for pixel_id in random_pixels[sample_index][:3]
                     )
 
-                benchmarks.append(
-                    Benchmark(
-                        benchmark_id=f"{network_name}_{mode}_{sample_index}",
+                instances.append(
+                    Instance(
+                        instance_id=f"{network_name}_{mode}_{sample_index}",
                         suite_name=SUITE_NAME,
                         nn1=original,
                         nn2=quantized,
@@ -131,4 +131,4 @@ def load_suite() -> BenchmarkSuite:
                     )
                 )
 
-    return BenchmarkSuite(name=SUITE_NAME, benchmarks=benchmarks)
+    return InstanceSuite(name=SUITE_NAME, instances=instances)

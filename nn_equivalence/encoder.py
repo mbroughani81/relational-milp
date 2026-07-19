@@ -94,50 +94,12 @@ def add_output_distance_constraint(
     second_output_vars: list[gp.Var],
     epsilon: float,
     name_prefix: str = "output_distance",
-) -> list[gp.Var]:
+) -> None:
     if epsilon < 0:
         raise ValueError("epsilon must be non-negative")
     if len(first_output_vars) != len(second_output_vars):
         raise ValueError("output variable lists must have the same length")
 
-    model.update()
-
-    selectors: list[gp.Var] = []
-    for i, (first_var, second_var) in enumerate(
-        zip(first_output_vars, second_output_vars)
-    ):
-        positive_selector = model.addVar(
-            vtype=gp.GRB.BINARY, name=f"{name_prefix}_{i}_positive"
-        )
-        negative_selector = model.addVar(
-            vtype=gp.GRB.BINARY, name=f"{name_prefix}_{i}_negative"
-        )
-        selectors.extend([positive_selector, negative_selector])
-
-        model.addGenConstrIndicator(
-            positive_selector,
-            True,
-            first_var - second_var,
-            gp.GRB.GREATER_EQUAL,
-            epsilon,
-            name=f"{name_prefix}_{i}_first_minus_second_indicator",
-        )
-
-        model.addGenConstrIndicator(
-            negative_selector,
-            True,
-            second_var - first_var,
-            gp.GRB.GREATER_EQUAL,
-            epsilon,
-            name=f"{name_prefix}_{i}_second_minus_first_indicator",
-        )
-
-    model.addConstr(
-        gp.quicksum(selectors) >= 1,
-        name=f"{name_prefix}_at_least_one_coordinate",
-    )
-
-    return selectors
 
 
 def add_hidden_variables(
@@ -146,11 +108,8 @@ def add_hidden_variables(
     nn: NeuralNetwork,
     name_prefix: str,
     input_bounds: Bounds,
-) -> tuple[list[list[gp.Var]], list[list[gp.Var]], list[gp.Var], list[gp.Var]]:
+) -> list[gp.Var]:
     current_bounds = input_bounds
-    pre_activation_vars: list[list[gp.Var]] = []
-    activation_vars: list[list[gp.Var]] = []
-    all_deltas: list[gp.Var] = []
     previous_vars = input_vars
 
     for layer_index, (weights, bias) in enumerate(nn, start=1):
@@ -167,7 +126,6 @@ def add_hidden_variables(
             bias=bias,
             layer_name=f"{name_prefix}_layer_{layer_index}",
         )
-        pre_activation_vars.append(current_vars)
 
         is_output_layer = layer_index == len(nn)
         if is_output_layer:
@@ -179,17 +137,14 @@ def add_hidden_variables(
             model.addVar(lb=0.0, ub=max(0.0, upper), name=f"{name_prefix}_a{layer_index}_{i}")
             for i, (_, upper) in enumerate(z_bounds)
         ]
-        all_deltas.extend(
-            add_relu_big_m_constraints(
-                model=model,
-                z_vars=current_vars,
-                a_vars=current_activation_vars,
-                z_bounds=z_bounds,
-                layer_name=f"{name_prefix}_layer_{layer_index}",
-            )
+        add_relu_big_m_constraints(
+            model=model,
+            z_vars=current_vars,
+            a_vars=current_activation_vars,
+            z_bounds=z_bounds,
+            layer_name=f"{name_prefix}_layer_{layer_index}",
         )
-        activation_vars.append(current_activation_vars)
         previous_vars = current_activation_vars
         current_bounds = relu_bounds(z_bounds)
 
-    return pre_activation_vars, activation_vars, previous_vars, all_deltas
+    return previous_vars

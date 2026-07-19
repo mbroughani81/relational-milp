@@ -7,14 +7,14 @@ from pathlib import Path
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Summarize runtime and verifier statuses from a benchmark CSV."
+        description="Summarize runtime and verifier statuses from an instance CSV."
     )
     parser.add_argument(
         "csv_path",
         nargs="?",
         default=Path("out.csv"),
         type=Path,
-        help="Benchmark CSV path. Defaults to out.csv.",
+        help="Instance CSV path. Defaults to out.csv.",
     )
     return parser.parse_args()
 

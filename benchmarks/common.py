@@ -5,7 +5,7 @@ from typing import Literal
 
 from nn_equivalence.nn_types import Bounds, NeuralNetwork
 
-BenchmarkStatus = Literal["sat", "unsat", "timeout", "unknown"]
+InstanceStatus = Literal["sat", "unsat", "timeout", "unknown"]
 
 
 @dataclass(frozen=True)
@@ -20,62 +20,38 @@ class InputRegion:
 
 
 @dataclass(frozen=True)
-class Benchmark:
-    benchmark_id: str
+class Instance:
+    instance_id: str
     suite_name: str
     nn1: NeuralNetwork
     nn2: NeuralNetwork
     input_region: InputRegion
     epsilon: float
-    expected_status: BenchmarkStatus | None = None
+    expected_status: InstanceStatus | None = None
     timeout_sec: float = 30.0
     metadata: dict[str, str | int | float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
-class BenchmarkSuite:
+class InstanceSuite:
     name: str
-    benchmarks: list[Benchmark]
+    instances: list[Instance]
 
 
 @dataclass(frozen=True)
-class ReluStats:
-    active: int = 0
-    inactive: int = 0
-    unstable: int = 0
-
-    @property
-    def total(self) -> int:
-        return self.active + self.inactive + self.unstable
-
-    def __add__(self, other: "ReluStats") -> "ReluStats":
-        return ReluStats(
-            active=self.active + other.active,
-            inactive=self.inactive + other.inactive,
-            unstable=self.unstable + other.unstable,
-        )
+class InstanceStats:
+    pass
 
 
 @dataclass(frozen=True)
-class BenchmarkResult:
-    benchmark_id: str
+class InstanceResult:
+    instance_id: str
     suite_name: str
-    status: BenchmarkStatus
+    status: InstanceStatus
     runtime_sec: float
     epsilon: float
-    input_dim: int
-    output_dim: int
-    num_layers: int
-    num_relu: int
-    num_active_relu: int
-    num_inactive_relu: int
-    num_unstable_relu: int
-    num_vars: int
-    num_binary_vars: int
-    num_constraints: int
-    max_output_diff: float | None
-    counterexample: list[float] | None
-    expected_status: BenchmarkStatus | None
+    expected_status: InstanceStatus | None
+    stats: InstanceStats = field(default_factory=InstanceStats)
 
     @property
     def matched_expected(self) -> bool | None:
@@ -84,20 +60,19 @@ class BenchmarkResult:
         return self.status == self.expected_status
 
 
-def validate_benchmark(benchmark: Benchmark) -> None:
-    if benchmark.epsilon < 0:
+def validate_instance(instance: Instance) -> None:
+    if instance.epsilon < 0:
         raise ValueError("epsilon must be non-negative")
-    if len(benchmark.nn1) != len(benchmark.nn2):
+    if len(instance.nn1) != len(instance.nn2):
         raise ValueError("nn1 and nn2 must have the same number of layers")
-    if len(benchmark.nn1[0][0][0]) != len(benchmark.input_region.lower_bounds):
+    if len(instance.nn1[0][0][0]) != len(instance.input_region.lower_bounds):
         raise ValueError("input region dimension does not match network input size")
 
     for layer_index, ((weights1, bias1), (weights2, bias2)) in enumerate(
-        zip(benchmark.nn1, benchmark.nn2), start=1
+        zip(instance.nn1, instance.nn2), start=1
     ):
         if len(weights1) != len(weights2) or len(bias1) != len(bias2):
             raise ValueError(f"layer {layer_index} output sizes differ")
         if len(weights1[0]) != len(weights2[0]):
             raise ValueError(f"layer {layer_index} input sizes differ")
-
 

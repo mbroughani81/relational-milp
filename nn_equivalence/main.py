@@ -7,14 +7,14 @@ from nn_equivalence.nn_types import LinearLayer
 import nn_equivalence.encoder as encoder
 
 def main() -> None:
-    pair = generate_dnn_pair(
-        hidden_sizes=[64, 64],
-        name="smoky"
-    )
-    nn1: list[LinearLayer] = load_linear_layers(pair.first)
-    nn2: list[LinearLayer] = load_linear_layers(pair.second)
+    # pair = generate_dnn_pair(
+    #     hidden_sizes=[64, 64],
+    #     name="smoky"
+    # )
+    # nn1: list[LinearLayer] = load_linear_layers(pair.first)
+    # nn2: list[LinearLayer] = load_linear_layers(pair.second)
 
-    # nn1, nn2 = load_nn_pair_1()
+    nn1, nn2 = load_nn_pair_1()
     # nn1, nn2 = load_nn_pair_2()
 
     model = gp.Model("nn_eq")
@@ -22,6 +22,7 @@ def main() -> None:
 
     epsilon = 0.06
     input_size = len(nn1[0][0][0])
+    input_bounds = [(0.0, 1.0)] * input_size
     print(input_size)
 
     # add nn constraints and vars
@@ -31,17 +32,19 @@ def main() -> None:
         0.0,
         1.0
     )
-    _, _, nn1_output_vars, _ = encoder.add_hidden_variables(
+    nn1_output_vars = encoder.add_hidden_variables(
         model,
         x,
         nn1,
-        "nn1"
+        "nn1",
+        input_bounds=input_bounds,
     )
-    _, _, nn2_output_vars, _ = encoder.add_hidden_variables(
+    nn2_output_vars = encoder.add_hidden_variables(
         model,
         x,
         nn2,
-        "nn2"
+        "nn2",
+        input_bounds=input_bounds,
     )
 
     # add equivalence contraint

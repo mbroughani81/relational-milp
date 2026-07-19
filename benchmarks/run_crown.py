@@ -20,14 +20,14 @@ import torch
 from torch import nn
 
 from benchmarks.common import (
-    Benchmark,
-    BenchmarkResult,
-    BenchmarkStatus,
-    BenchmarkSuite,
-    validate_benchmark,
+    Instance,
+    InstanceResult,
+    SolverStatus,
+    InstanceSuite,
+    validate_instance,
 )
 from nn_equivalence.nn_types import NeuralNetwork
-ARTIFACT_ROOT = Path("artifacts/abcrown_benchmarks")
+ARTIFACT_ROOT = Path("artifacts/abcrown_instances")
 ONNX_OPSET = 18
 BATCH_SIZE = 2048
 ConfigValue = str | int | float | bool | dict[str, "ConfigValue"]
@@ -235,14 +235,14 @@ class DifferenceNetwork(nn.Module):
         return self.nn1(x) - self.nn2(x)
 
 
-def load_suite(name: str) -> BenchmarkSuite:
+def load_suite(name: str) -> InstanceSuite:
     module = importlib.import_module(f"benchmarks.{name}")
     return module.load_suite()
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run an NN equivalence benchmark suite with alpha-beta-CROWN."
+        description="Run an NN equivalence instance suite with alpha-beta-CROWN."
     )
     parser.add_argument("--suite", default="sample")
     parser.add_argument(
@@ -261,8 +261,8 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help=(
-            "Override every benchmark.timeout_sec before generating CROWN configs. "
-            "Without this, each suite benchmark controls its own bab.timeout."
+            "Override every instance.timeout_sec before generating CROWN configs. "
+            "Without this, each suite instance controls its own bab.timeout."
         ),
     )
     return parser.parse_args()
@@ -272,23 +272,23 @@ def safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
 
 
-def model_key(benchmark: Benchmark) -> str:
-    payload = json.dumps([benchmark.nn1, benchmark.nn2], sort_keys=True)
+def model_key(instance: Instance) -> str:
+    payload = json.dumps([instance.nn1, instance.nn2], sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def export_model_once(
-    benchmark: Benchmark,
+    instance: Instance,
     model_dir: Path,
     exported_models: dict[str, Path],
 ) -> Path:
-    key = model_key(benchmark)
+    key = model_key(instance)
     if key in exported_models:
         return exported_models[key]
 
     onnx_path = model_dir / f"diff_{key}.onnx"
-    input_dim = len(benchmark.input_region.lower_bounds)
-    model = DifferenceNetwork(benchmark.nn1, benchmark.nn2).eval()
+    input_dim = len(instance.input_region.lower_bounds)
+    model = DifferenceNetwork(instance.nn1, instance.nn2).eval()
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
         io.StringIO()
     ):
@@ -304,11 +304,11 @@ def export_model_once(
     return onnx_path
 
 
-def write_vnnlib(path: Path, benchmark: Benchmark) -> None:
-    output_dim = len(benchmark.nn1[-1][1])
+def write_vnnlib(path: Path, instance: Instance) -> None:
+    output_dim = len(instance.nn1[-1][1])
     lines: list[str] = []
 
-    for i in range(len(benchmark.input_region.lower_bounds)):
+    for i in range(len(instance.input_region.lower_bounds)):
         lines.append(f"(declare-const X_{i} Real)")
     lines.append("")
     for i in range(output_dim):
@@ -318,17 +318,17 @@ def write_vnnlib(path: Path, benchmark: Benchmark) -> None:
 
     for output_index in range(output_dim):
         lines.append("  (and")
-        for input_index, (lower, upper) in enumerate(benchmark.input_region.bounds()):
+        for input_index, (lower, upper) in enumerate(instance.input_region.bounds()):
             lines.append(f"    (>= X_{input_index} {lower:.17g})")
             lines.append(f"    (<= X_{input_index} {upper:.17g})")
-        lines.append(f"    (>= Y_{output_index} {benchmark.epsilon:.17g})")
+        lines.append(f"    (>= Y_{output_index} {instance.epsilon:.17g})")
         lines.append("  )")
 
         lines.append("  (and")
-        for input_index, (lower, upper) in enumerate(benchmark.input_region.bounds()):
+        for input_index, (lower, upper) in enumerate(instance.input_region.bounds()):
             lines.append(f"    (>= X_{input_index} {lower:.17g})")
             lines.append(f"    (<= X_{input_index} {upper:.17g})")
-        lines.append(f"    (<= Y_{output_index} {-benchmark.epsilon:.17g})")
+        lines.append(f"    (<= Y_{output_index} {-instance.epsilon:.17g})")
         lines.append("  )")
 
     lines.append("))")
@@ -350,22 +350,22 @@ def write_instances_csv(
     path.write_text("".join(lines), encoding="utf-8")
 
 
-def write_manifest(path: Path, benchmarks: list[Benchmark], rows: list[tuple[Path, Path, float]], root_dir: Path) -> None:
-    lines = ["index,benchmark_id,epsilon,expected_status,onnx,vnnlib,timeout\n"]
-    for index, (benchmark, (onnx_path, vnnlib_path, timeout)) in enumerate(
-        zip(benchmarks, rows)
+def write_manifest(path: Path, instances: list[Instance], rows: list[tuple[Path, Path, float]], root_dir: Path) -> None:
+    lines = ["index,instance_id,epsilon,expected_status,onnx,vnnlib,timeout\n"]
+    for index, (instance, (onnx_path, vnnlib_path, timeout)) in enumerate(
+        zip(instances, rows)
     ):
-        expected = benchmark.expected_status or ""
+        expected = instance.expected_status or ""
         lines.append(
-            f"{index},{benchmark.benchmark_id},{benchmark.epsilon:.17g},"
+            f"{index},{instance.instance_id},{instance.epsilon:.17g},"
             f"{expected},{onnx_path.relative_to(root_dir)},"
             f"{vnnlib_path.relative_to(root_dir)},{timeout:.17g}\n"
         )
     path.write_text("".join(lines), encoding="utf-8")
 
 
-def suite_output_dim(benchmarks: list[Benchmark]) -> int:
-    output_dims = {len(benchmark.nn1[-1][1]) for benchmark in benchmarks}
+def suite_output_dim(instances: list[Instance]) -> int:
+    output_dims = {len(instance.nn1[-1][1]) for instance in instances}
     if len(output_dims) != 1:
         raise ValueError(
             "alpha-beta-CROWN config requires one data.num_outputs value; "
@@ -457,7 +457,7 @@ def prepare_profile_runtime(profile: str) -> None:
 
 def run_abcrown(
     config_path: Path,
-    benchmarks: list[Benchmark],
+    instances: list[Instance],
     rows: list[tuple[Path, Path, float]],
     profile: str,
 ) -> tuple[int, str, dict[int, tuple[str, float]]]:
@@ -468,15 +468,15 @@ def run_abcrown(
             from abcrown import ABCrownSolver, ConfigBuilder, IOConstraints
 
             prepare_profile_runtime(profile)
-            if len(rows) != len(benchmarks):
+            if len(rows) != len(instances):
                 raise ValueError(
-                    f"artifact row count ({len(rows)}) does not match benchmark "
-                    f"count ({len(benchmarks)})"
+                    f"artifact row count ({len(rows)}) does not match instance "
+                    f"count ({len(instances)})"
                 )
-            output_dim = suite_output_dim(benchmarks)
+            output_dim = suite_output_dim(instances)
             work_dir = config_path.parent
-            for index, (benchmark, (onnx_path, vnnlib_path, _)) in enumerate(
-                zip(benchmarks, rows)
+            for index, (instance, (onnx_path, vnnlib_path, _)) in enumerate(
+                zip(instances, rows)
             ):
                 instance_config_path = work_dir / f"abcrown_config_instance_{index}.yaml"
                 instance_results_path = work_dir / f"abcrown_results_{index}.txt"
@@ -486,14 +486,14 @@ def run_abcrown(
                     instance_results_path,
                     output_dim,
                     profile,
-                    benchmark.timeout_sec,
+                    instance.timeout_sec,
                 )
                 config = ConfigBuilder.from_yaml(str(instance_config_path)).to_dict()
                 solve_result = ABCrownSolver(
                     str(onnx_path),
                     constraint=IOConstraints(vnnlib_path=str(vnnlib_path)),
                     config=config,
-                    name=f"{benchmark.suite_name}/{benchmark.benchmark_id}",
+                    name=f"{instance.suite_name}/{instance.instance_id}",
                 ).verify()
                 instance_results_path.write_text(
                     f"{index},{solve_result.status},{solve_result.success},"
@@ -509,7 +509,7 @@ def run_abcrown(
     return 0, captured.getvalue(), results
 
 
-def benchmark_status_from_abcrown(status: str | None) -> BenchmarkStatus:
+def instance_status_from_abcrown(status: str | None) -> SolverStatus:
     if status in {"safe", "safe-incomplete", "unsat", "verified"}:
         return "unsat"
     if status in {"unsafe-pgd", "unsafe-bab", "sat", "falsified"}:
@@ -519,18 +519,18 @@ def benchmark_status_from_abcrown(status: str | None) -> BenchmarkStatus:
     return "unknown"
 
 
-def format_expected(result: BenchmarkResult) -> str:
+def format_expected(result: InstanceResult) -> str:
     if result.expected_status is None:
         return ""
     matched = "yes" if result.matched_expected else "no"
     return f"{result.expected_status}:{matched}"
 
 
-def print_results(results: list[BenchmarkResult], abcrown_statuses: list[str]) -> None:
-    print("benchmark_id,status,abcrown_status,expected,runtime_sec,epsilon")
+def print_results(results: list[InstanceResult], abcrown_statuses: list[str]) -> None:
+    print("instance_id,status,abcrown_status,expected,runtime_sec,epsilon")
     for result, abcrown_status in zip(results, abcrown_statuses):
         print(
-            f"{result.benchmark_id},"
+            f"{result.instance_id},"
             f"{result.status},"
             f"{abcrown_status},"
             f"{format_expected(result)},"
@@ -540,9 +540,9 @@ def print_results(results: list[BenchmarkResult], abcrown_statuses: list[str]) -
 
 
 def prepare_artifacts(
-    suite: BenchmarkSuite,
+    suite: InstanceSuite,
     profile: str,
-) -> tuple[Path, Path, list[Benchmark], list[tuple[Path, Path, float]]]:
+) -> tuple[Path, list[Instance], list[tuple[Path, Path, float]]]:
     work_dir = (ARTIFACT_ROOT / suite.name / profile).resolve()
     model_dir = work_dir / "models"
     spec_dir = work_dir / "vnnlib"
@@ -552,84 +552,50 @@ def prepare_artifacts(
     rows: list[tuple[Path, Path, float]] = []
     exported_models: dict[str, Path] = {}
 
-    for benchmark in suite.benchmarks:
-        validate_benchmark(benchmark)
-        onnx_path = export_model_once(benchmark, model_dir, exported_models)
-        vnnlib_path = spec_dir / f"{safe_name(benchmark.benchmark_id)}.vnnlib"
-        write_vnnlib(vnnlib_path, benchmark)
-        rows.append((onnx_path, vnnlib_path, benchmark.timeout_sec))
+    for instance in suite.instances:
+        validate_instance(instance)
+        onnx_path = export_model_once(instance, model_dir, exported_models)
+        vnnlib_path = spec_dir / f"{safe_name(instance.instance_id)}.vnnlib"
+        write_vnnlib(vnnlib_path, instance)
+        rows.append((onnx_path, vnnlib_path, instance.timeout_sec))
 
     instances_path = work_dir / "instances.csv"
-    manifest_path = work_dir / "benchmark_manifest.csv"
+    manifest_path = work_dir / "instance_manifest.csv"
     config_path = work_dir / "abcrown_config.yaml"
     write_instances_csv(instances_path, rows, work_dir)
-    write_manifest(manifest_path, suite.benchmarks, rows, work_dir)
+    write_manifest(manifest_path, suite.instances, rows, work_dir)
     write_config(
         config_path,
         work_dir,
         work_dir / "abcrown_results.txt",
-        suite_output_dim(suite.benchmarks),
+        suite_output_dim(suite.instances),
         profile,
-        max(benchmark.timeout_sec for benchmark in suite.benchmarks),
+        max(instance.timeout_sec for instance in suite.instances),
     )
-    return work_dir, config_path, suite.benchmarks, rows
-
-
-def apply_timeout_override(
-    suite: BenchmarkSuite,
-    timeout_sec: float | None,
-) -> BenchmarkSuite:
-    if timeout_sec is None:
-        return suite
-    if timeout_sec <= 0:
-        raise ValueError("--timeout must be positive")
-    return BenchmarkSuite(
-        name=suite.name,
-        benchmarks=[
-            replace(benchmark, timeout_sec=timeout_sec)
-            for benchmark in suite.benchmarks
-        ],
-    )
+    return config_path, suite.instances, rows
 
 
 def build_results(
-    benchmarks: list[Benchmark],
+    instances: list[Instance],
     abcrown_result_by_index: dict[int, tuple[str, float]],
-) -> tuple[list[BenchmarkResult], list[str]]:
-    results: list[BenchmarkResult] = []
+) -> tuple[list[InstanceResult], list[str]]:
+    results: list[InstanceResult] = []
     abcrown_statuses: list[str] = []
 
-    for index, benchmark in enumerate(benchmarks):
+    for index, instance in enumerate(instances):
         abcrown_status, runtime_sec = abcrown_result_by_index.get(
             index, ("missing", 0.0)
         )
-        status = benchmark_status_from_abcrown(abcrown_status)
+        status = instance_status_from_abcrown(abcrown_status)
         abcrown_statuses.append(abcrown_status)
-        input_dim = len(benchmark.input_region.lower_bounds)
-        output_dim = len(benchmark.nn1[-1][1])
-        num_relu = sum(len(bias) for _, bias in benchmark.nn1[:-1]) + sum(
-            len(bias) for _, bias in benchmark.nn2[:-1]
-        )
         results.append(
-            BenchmarkResult(
-                benchmark_id=benchmark.benchmark_id,
-                suite_name=benchmark.suite_name,
+            InstanceResult(
+                instance_id=instance.instance_id,
+                suite_name=instance.suite_name,
                 status=status,
                 runtime_sec=runtime_sec,
-                epsilon=benchmark.epsilon,
-                input_dim=input_dim,
-                output_dim=output_dim,
-                num_layers=len(benchmark.nn1),
-                num_relu=num_relu,
-                num_active_relu=0,
-                num_inactive_relu=0,
-                num_unstable_relu=0,
-                num_vars=0,
-                num_binary_vars=0,
-                num_constraints=0,
-                max_output_diff=None,
-                counterexample=None,
-                expected_status=benchmark.expected_status,
+                epsilon=instance.epsilon,
+                expected_status=instance.expected_status,
             )
         )
 
@@ -638,25 +604,16 @@ def build_results(
 
 def main() -> None:
     args = parse_args()
-    if args.list_profiles:
-        print("profile")
-        for profile in sorted(ABCROWN_PROFILES):
-            print(profile)
-        return
 
-    suite = apply_timeout_override(load_suite(args.suite), args.timeout)
-    work_dir, config_path, benchmarks, rows = prepare_artifacts(suite, args.profile)
+    suite = load_suite(args.suite)
+    config_path, instances, rows = prepare_artifacts(suite, args.profile)
     returncode, output, abcrown_result_by_index = run_abcrown(
-        config_path, benchmarks, rows, args.profile
+        config_path, instances, rows, args.profile
     )
     if returncode != 0:
         print(output, end="")
 
-    results, abcrown_statuses = build_results(benchmarks, abcrown_result_by_index)
-
-    print(file=sys.stderr)
-    print(f"artifacts: {work_dir}", file=sys.stderr)
-    print(f"profile: {args.profile}", file=sys.stderr)
+    results, abcrown_statuses = build_results(instances, abcrown_result_by_index)
     print_results(results, abcrown_statuses)
     raise SystemExit(returncode)
 

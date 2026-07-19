@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 
-from benchmarks.common import Benchmark, BenchmarkSuite, InputRegion
+from benchmarks.common import Instance, InstanceSuite, InputRegion
 from nn_equivalence.nn_types import LinearLayer, NeuralNetwork
 
 
@@ -55,12 +55,12 @@ def epsilon_id(epsilon: float) -> str:
     return str(epsilon).replace(".", "p")
 
 
-def load_suite() -> BenchmarkSuite:
+def load_suite() -> InstanceSuite:
     region = InputRegion(
         lower_bounds=[-1.0, -1.0],
         upper_bounds=[1.0, 1.0],
     )
-    benchmarks: list[Benchmark] = []
+    instances: list[Instance] = []
     architectures = [
         [2, 1000, 1000, 1000, 2],
     ]
@@ -73,9 +73,9 @@ def load_suite() -> BenchmarkSuite:
         arch_id = architecture_id(architecture)
 
         for epsilon in identical_epsilons:
-            benchmarks.append(
-                Benchmark(
-                    benchmark_id=(
+            instances.append(
+                Instance(
+                    instance_id=(
                         f"synthetic_identical_{arch_id}_eps_{epsilon_id(epsilon)}"
                     ),
                     suite_name="synthetic",
@@ -90,9 +90,9 @@ def load_suite() -> BenchmarkSuite:
             )
 
         for epsilon in noisy_epsilons:
-            benchmarks.append(
-                Benchmark(
-                    benchmark_id=(
+            instances.append(
+                Instance(
+                    instance_id=(
                         f"synthetic_noisy_{arch_id}_eps_{epsilon_id(epsilon)}"
                     ),
                     suite_name="synthetic",
@@ -106,4 +106,4 @@ def load_suite() -> BenchmarkSuite:
                 )
             )
 
-    return BenchmarkSuite(name="bigger_synthetic", benchmarks=benchmarks)
+    return InstanceSuite(name="bigger_synthetic", instances=instances)

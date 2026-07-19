@@ -4,7 +4,7 @@ from pathlib import Path
 
 from torchvision import datasets, transforms
 
-from benchmarks.common import Benchmark, BenchmarkSuite, InputRegion
+from benchmarks.common import Instance, InstanceSuite, InputRegion
 from nn_equivalence.nn_loader import load_linear_layers
 
 
@@ -26,9 +26,9 @@ def input_region_from_pixels(pixels: list[float], radius: float) -> InputRegion:
     )
 
 
-def load_suite() -> BenchmarkSuite:
+def load_suite() -> InstanceSuite:
     data_dir = Path("data")
-    benchmarks: list[Benchmark] = []
+    instances: list[Instance] = []
     input_radius = 0.03
     output_epsilons = [0.01, 10, 20, 100, 1000]
     timeout_sec = 10.0
@@ -55,9 +55,9 @@ def load_suite() -> BenchmarkSuite:
 
             for output_epsilon in output_epsilons:
                 epsilon_id = str(output_epsilon).replace(".", "p")
-                benchmarks.append(
-                    Benchmark(
-                        benchmark_id=(
+                instances.append(
+                    Instance(
+                        instance_id=(
                             f"mnist_{model_name}_sample_{sample_index:03d}"
                             f"_eps_{epsilon_id}"
                         ),
@@ -79,4 +79,4 @@ def load_suite() -> BenchmarkSuite:
                     )
                 )
 
-    return BenchmarkSuite(name="mnist", benchmarks=benchmarks)
+    return InstanceSuite(name="mnist", instances=instances)
