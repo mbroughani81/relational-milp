@@ -15,7 +15,7 @@ from nn_equivalence.nn_types import NeuralNetwork
 SUITE_NAME = "mnist_reludiff"
 DEFAULT_EPSILON = 1.0
 DEFAULT_PERTURB = 3.0
-DEFAULT_TIMEOUT_SEC = 300
+DEFAULT_TIMEOUT_SEC = 5
 
 def get_env_tuple(name: str) -> tuple[str, ...]:
     value = os.environ.get(name)
