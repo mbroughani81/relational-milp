@@ -616,6 +616,10 @@ def build_results(
 
 def main() -> None:
     args = parse_args()
+    if args.list_profiles:
+        for profile in sorted(ABCROWN_PROFILES):
+            print(profile)
+        return
 
     suite = load_suite(args.suite, parse_suite_options(args.suite_options))
     config_path, instances, rows = prepare_artifacts(suite, args.profile)

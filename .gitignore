@@ -32,3 +32,4 @@ env/
 *.sol
 *.log
 *.csv
+!requirements.txt

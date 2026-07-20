@@ -1,0 +1,7 @@
+gurobipy
+highspy
+onnx
+pyomo
+pytest
+torch
+torchvision
