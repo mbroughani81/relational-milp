@@ -5,13 +5,22 @@ import importlib
 import gurobipy as gp
 from gurobipy import GRB
 
-from benchmarks.common import Instance, InstanceSuite, InstanceResult, InstanceStatus, InputRegion, validate_instance
+from benchmarks.common import (
+    Instance,
+    InstanceResult,
+    InstanceStatus,
+    InstanceSuite,
+    InputRegion,
+    SuiteOptions,
+    parse_suite_options,
+    validate_instance,
+)
 import nn_equivalence.encoder as encoder
 from nn_equivalence.nn_types import NeuralNetwork
 
-def load_suite(name: str) -> InstanceSuite:
+def load_suite(name: str, suite_options: SuiteOptions) -> InstanceSuite:
     module = importlib.import_module(f"benchmarks.{name}")
-    return module.load_suite()
+    return module.load_suite(suite_options)
 
 
 def format_expected(result: InstanceResult) -> str:
@@ -36,6 +45,16 @@ def print_results(results: list[InstanceResult]) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run an NN equivalence instance suite.")
     parser.add_argument("--suite", default="sample")
+    parser.add_argument(
+        "--suite-options",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "Suite-specific option. Repeat for multiple options; values may "
+            "contain commas, e.g. --suite-options modes=global,three_pixel."
+        ),
+    )
     return parser.parse_args()
 
 def _status_from_gurobi(status: int) -> InstanceStatus:
@@ -172,7 +191,7 @@ def run_instance(instance: Instance) -> InstanceResult:
 
 def main() -> None:
     args = parse_args()
-    suite = load_suite(args.suite)
+    suite = load_suite(args.suite, parse_suite_options(args.suite_options))
     results = [run_instance(instance) for instance in suite.instances]
     print_results(results)
 

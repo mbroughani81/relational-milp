@@ -4,7 +4,7 @@ from pathlib import Path
 
 from torchvision import datasets, transforms
 
-from benchmarks.common import Instance, InstanceSuite, InputRegion
+from benchmarks.common import Instance, InstanceSuite, InputRegion, SuiteOptions
 from nn_equivalence.nn_loader import load_linear_layers
 
 
@@ -26,7 +26,8 @@ def input_region_from_pixels(pixels: list[float], radius: float) -> InputRegion:
     )
 
 
-def load_suite() -> InstanceSuite:
+def load_suite(suite_options: SuiteOptions | None = None) -> InstanceSuite:
+    del suite_options
     data_dir = Path("data")
     instances: list[Instance] = []
     input_radius = 0.03

@@ -22,8 +22,10 @@ from torch import nn
 from benchmarks.common import (
     Instance,
     InstanceResult,
-    SolverStatus,
+    InstanceStatus,
     InstanceSuite,
+    SuiteOptions,
+    parse_suite_options,
     validate_instance,
 )
 from nn_equivalence.nn_types import NeuralNetwork
@@ -235,9 +237,9 @@ class DifferenceNetwork(nn.Module):
         return self.nn1(x) - self.nn2(x)
 
 
-def load_suite(name: str) -> InstanceSuite:
+def load_suite(name: str, suite_options: SuiteOptions) -> InstanceSuite:
     module = importlib.import_module(f"benchmarks.{name}")
-    return module.load_suite()
+    return module.load_suite(suite_options)
 
 
 def parse_args() -> argparse.Namespace:
@@ -245,6 +247,16 @@ def parse_args() -> argparse.Namespace:
         description="Run an NN equivalence instance suite with alpha-beta-CROWN."
     )
     parser.add_argument("--suite", default="sample")
+    parser.add_argument(
+        "--suite-options",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "Suite-specific option. Repeat for multiple options; values may "
+            "contain commas, e.g. --suite-options modes=global,three_pixel."
+        ),
+    )
     parser.add_argument(
         "--profile",
         default="beta_strong",
@@ -509,7 +521,7 @@ def run_abcrown(
     return 0, captured.getvalue(), results
 
 
-def instance_status_from_abcrown(status: str | None) -> SolverStatus:
+def instance_status_from_abcrown(status: str | None) -> InstanceStatus:
     if status in {"safe", "safe-incomplete", "unsat", "verified"}:
         return "unsat"
     if status in {"unsafe-pgd", "unsafe-bab", "sat", "falsified"}:
@@ -605,7 +617,7 @@ def build_results(
 def main() -> None:
     args = parse_args()
 
-    suite = load_suite(args.suite)
+    suite = load_suite(args.suite, parse_suite_options(args.suite_options))
     config_path, instances, rows = prepare_artifacts(suite, args.profile)
     returncode, output, abcrown_result_by_index = run_abcrown(
         config_path, instances, rows, args.profile

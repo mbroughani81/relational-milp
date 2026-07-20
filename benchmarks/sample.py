@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from benchmarks.common import Instance, InstanceSuite, InputRegion
+from benchmarks.common import Instance, InstanceSuite, InputRegion, SuiteOptions
 from nn_equivalence.nn_loader import load_nn_pair_1, load_nn_pair_2
 
 
-def load_suite() -> InstanceSuite:
+def load_suite(suite_options: SuiteOptions | None = None) -> InstanceSuite:
+    del suite_options
     region = InputRegion(
         lower_bounds=[0.0, 0.0],
         upper_bounds=[1.0, 1.0],

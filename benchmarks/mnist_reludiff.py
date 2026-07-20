@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
+import sys
 
-from benchmarks.common import Instance, InstanceSuite, InputRegion
+from benchmarks.common import Instance, InstanceSuite, InputRegion, SuiteOptions
 from nn_equivalence.reludiff_nnet import (
     MNIST_RELUDIFF_NETWORKS,
     load_nnet_layers,
@@ -12,30 +12,61 @@ from nn_equivalence.reludiff_nnet import (
 )
 from nn_equivalence.nn_types import NeuralNetwork
 
-SUITE_NAME = "mnist_reludiff"
-DEFAULT_EPSILON = 1.0
-DEFAULT_PERTURB = 3.0
-DEFAULT_TIMEOUT_SEC = 5
+DEFAULT_SUITE_OPTIONS: SuiteOptions = {
+    "epsilon": "1.0",
+    "perturb": "3.0",
+    "timeout": "5",
+}
 
-def get_env_tuple(name: str) -> tuple[str, ...]:
-    value = os.environ.get(name)
+
+def _normalized_options(suite_options: SuiteOptions | None) -> SuiteOptions:
+    options: SuiteOptions = dict(DEFAULT_SUITE_OPTIONS)
+    for key, value in (suite_options or {}).items():
+        normalized_key = key.strip().lower().replace("-", "_")
+        options[normalized_key] = value
+
+    allowed_options = {"networks", "modes", "limit", "timeout", "epsilon", "perturb"}
+    unknown_options = set(options) - allowed_options
+    if unknown_options:
+        raise ValueError(
+            f"unknown mnist_reludiff suite options: {sorted(unknown_options)}"
+        )
+    return options
+
+
+def _option_tuple(options: SuiteOptions, name: str) -> tuple[str, ...]:
+    value = options.get(name)
     if not value:
         return tuple()
     return tuple(part.strip() for part in value.split(",") if part.strip())
 
 
-def _limit() -> int | None:
-    value = os.environ.get("MNIST_RELUDIFF_LIMIT")
+def _limit(options: SuiteOptions) -> int | None:
+    value = options.get("limit")
     if not value:
         return None
     limit = int(value)
     if limit < 1 or limit > 100:
-        raise ValueError("MNIST_RELUDIFF_LIMIT must be between 1 and 100")
+        raise ValueError("mnist_reludiff limit must be between 1 and 100")
     return limit
 
 
-def _timeout() -> float:
-    return float(os.environ.get("MNIST_RELUDIFF_TIMEOUT", DEFAULT_TIMEOUT_SEC))
+def _timeout(options: SuiteOptions) -> float:
+    return float(options["timeout"])
+
+
+def _epsilon(options: SuiteOptions) -> float:
+    return float(options["epsilon"])
+
+
+def _perturb(options: SuiteOptions) -> float:
+    return float(options["perturb"])
+
+
+def _validate_network_names(network_names: tuple[str, ...]) -> None:
+    for network_name in network_names:
+        if network_name not in MNIST_RELUDIFF_NETWORKS:
+            raise ValueError(f"unknown ReluDiff MNIST network: {network_name}")
 
 
 def _global_region(raw_pixels: list[float], perturb: float) -> InputRegion:
@@ -54,19 +85,20 @@ def _three_pixel_region(raw_pixels: list[float], pixel_ids: list[int]) -> InputR
     return InputRegion(lower_bounds=lower_bounds, upper_bounds=upper_bounds)
 
 
-def _load_network_pairs(data_dir: Path) -> dict[str, tuple[NeuralNetwork, NeuralNetwork]]:
+def _load_network_pairs(
+    data_dir: Path,
+    network_names: tuple[str, ...],
+) -> dict[str, tuple[NeuralNetwork, NeuralNetwork]]:
     pairs: dict[str, tuple[NeuralNetwork, NeuralNetwork]] = {}
-    for network_name in get_env_tuple("MNIST_RELUDIFF_NETWORKS"):
-        if network_name not in MNIST_RELUDIFF_NETWORKS:
-            raise ValueError(f"unknown ReluDiff MNIST network: {network_name}")
+    for network_name in network_names:
         original = load_nnet_layers(data_dir / f"{network_name}.nnet")
         pairs[network_name] = (original, quantize_network_float16(original))
     return pairs
 
 
-def _require_data(data_dir: Path) -> None:
+def _require_data(data_dir: Path, network_names: tuple[str, ...]) -> None:
     required = [data_dir / "mnist_tests.h"]
-    required.extend(data_dir / f"{name}.nnet" for name in MNIST_RELUDIFF_NETWORKS)
+    required.extend(data_dir / f"{name}.nnet" for name in network_names)
     missing = [path for path in required if not path.exists()]
     if missing:
         raise FileNotFoundError(
@@ -76,23 +108,30 @@ def _require_data(data_dir: Path) -> None:
         )
 
 
-def load_suite() -> InstanceSuite:
+def load_suite(suite_options: SuiteOptions | None = None) -> InstanceSuite:
+    suite_name = "mnist_reludiff"
+    options = _normalized_options(suite_options)
+    print(f"{suite_name} suite options: {options}", file=sys.stderr)
     data_dir = Path("data/reludiff_mnist")
-    _require_data(data_dir)
+    network_names = _option_tuple(options, "networks")
+    _validate_network_names(network_names)
+    _require_data(data_dir, network_names)
 
     mnist_tests, labels, random_pixels = load_reludiff_mnist_tests(
         data_dir / "mnist_tests.h"
     )
 
-    modes = get_env_tuple("MNIST_RELUDIFF_MODES")
+    modes = _option_tuple(options, "modes")
     unknown_modes = set(modes) - {"global", "three_pixel"}
     if unknown_modes:
-        raise ValueError(f"unknown MNIST_RELUDIFF_MODES entries: {sorted(unknown_modes)}")
+        raise ValueError(f"unknown mnist_reludiff modes: {sorted(unknown_modes)}")
 
-    limit = _limit()
+    limit = _limit(options)
     sample_indices = range(100 if limit is None else limit)
-    timeout_sec = _timeout()
-    network_pairs = _load_network_pairs(data_dir)
+    timeout_sec = _timeout(options)
+    epsilon = _epsilon(options)
+    perturb = _perturb(options)
+    network_pairs = _load_network_pairs(data_dir, network_names)
 
     instances: list[Instance] = []
     for network_name, (original, quantized) in network_pairs.items():
@@ -100,8 +139,8 @@ def load_suite() -> InstanceSuite:
             for sample_index in sample_indices:
                 raw_pixels = mnist_tests[sample_index]
                 if mode == "global":
-                    input_region = _global_region(raw_pixels, DEFAULT_PERTURB)
-                    perturb_metadata = DEFAULT_PERTURB
+                    input_region = _global_region(raw_pixels, perturb)
+                    perturb_metadata = perturb
                 else:
                     input_region = _three_pixel_region(
                         raw_pixels, random_pixels[sample_index]
@@ -113,11 +152,11 @@ def load_suite() -> InstanceSuite:
                 instances.append(
                     Instance(
                         instance_id=f"{network_name}_{mode}_{sample_index}",
-                        suite_name=SUITE_NAME,
+                        suite_name=suite_name,
                         nn1=original,
                         nn2=quantized,
                         input_region=input_region,
-                        epsilon=DEFAULT_EPSILON,
+                        epsilon=epsilon,
                         expected_status=None,
                         timeout_sec=timeout_sec,
                         metadata={
@@ -131,4 +170,4 @@ def load_suite() -> InstanceSuite:
                     )
                 )
 
-    return InstanceSuite(name=SUITE_NAME, instances=instances)
+    return InstanceSuite(name=suite_name, instances=instances)

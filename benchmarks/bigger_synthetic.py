@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 
-from benchmarks.common import Instance, InstanceSuite, InputRegion
+from benchmarks.common import Instance, InstanceSuite, InputRegion, SuiteOptions
 from nn_equivalence.nn_types import LinearLayer, NeuralNetwork
 
 
@@ -55,7 +55,8 @@ def epsilon_id(epsilon: float) -> str:
     return str(epsilon).replace(".", "p")
 
 
-def load_suite() -> InstanceSuite:
+def load_suite(suite_options: SuiteOptions | None = None) -> InstanceSuite:
+    del suite_options
     region = InputRegion(
         lower_bounds=[-1.0, -1.0],
         upper_bounds=[1.0, 1.0],

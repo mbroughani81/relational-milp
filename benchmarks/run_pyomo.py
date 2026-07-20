@@ -14,14 +14,16 @@ from benchmarks.common import (
     InstanceResult,
     InstanceStatus,
     InstanceSuite,
+    SuiteOptions,
+    parse_suite_options,
     validate_instance,
 )
 from nn_equivalence.nn_types import Bounds, NeuralNetwork
 
 
-def load_suite(name: str) -> InstanceSuite:
+def load_suite(name: str, suite_options: SuiteOptions) -> InstanceSuite:
     module = importlib.import_module(f"benchmarks.{name}")
-    return module.load_suite()
+    return module.load_suite(suite_options)
 
 
 def format_expected(result: InstanceResult) -> str:
@@ -49,6 +51,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--suite", default="sample")
     parser.add_argument("--solver", default="highs", choices=("highs", "gurobi"))
+    parser.add_argument(
+        "--suite-options",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "Suite-specific option. Repeat for multiple options; values may "
+            "contain commas, e.g. --suite-options modes=global,three_pixel."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -240,7 +252,6 @@ def create_solver(solver_name: str, timeout_sec: float) -> Any:
             "Install the solver backend and make it available to Pyomo."
         )
 
-    print(f"timeout => {timeout_sec}")
     set_solver_timeout(solver, solver_name, timeout_sec)
     return solver
 
@@ -350,7 +361,7 @@ def run_instance(instance: Instance, solver_name: str) -> InstanceResult:
 def main() -> None:
     args = parse_args()
     try:
-        suite = load_suite(args.suite)
+        suite = load_suite(args.suite, parse_suite_options(args.suite_options))
         results = [
             run_instance(instance, args.solver)
             for instance in suite.instances
