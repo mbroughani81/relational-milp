@@ -20,6 +20,8 @@ from benchmarks.common import (
 )
 from nn_equivalence.nn_types import Bounds, NeuralNetwork
 
+WITNESS_TOLERANCE = 1e-6
+
 
 def load_suite(name: str, suite_options: SuiteOptions) -> InstanceSuite:
     module = importlib.import_module(f"benchmarks.{name}")
@@ -90,6 +92,27 @@ def affine_bounds(
 
 def relu_bounds(z_bounds: Bounds) -> Bounds:
     return [(max(0.0, lower), max(0.0, upper)) for lower, upper in z_bounds]
+
+
+def affine_values(
+    weights: list[list[float]],
+    bias: list[float],
+    inputs: list[float],
+) -> list[float]:
+    return [
+        sum(weight * input_value for weight, input_value in zip(row, inputs))
+        + bias_value
+        for row, bias_value in zip(weights, bias)
+    ]
+
+
+def forward_values(nn: NeuralNetwork, inputs: list[float]) -> list[float]:
+    values = inputs
+    for weights, bias in nn[:-1]:
+        values = [max(0.0, value) for value in affine_values(weights, bias, values)]
+
+    output_weights, output_bias = nn[-1]
+    return affine_values(output_weights, output_bias, values)
 
 
 def add_vars(
@@ -266,7 +289,39 @@ def status_from_pyomo(termination_condition: TC) -> InstanceStatus:
     return "unknown"
 
 
-def solve_differential_model(
+def validate_directional_witness(
+    instance: Instance,
+    input_vars: list[pyo.Var],
+    first_network_name: str,
+    second_network_name: str,
+    first_network: NeuralNetwork,
+    second_network: NeuralNetwork,
+) -> None:
+    input_values = [float(pyo.value(var)) for var in input_vars]
+    input_bounds = instance.input_region.bounds()
+    input_verified = all(
+        lower - WITNESS_TOLERANCE <= value <= upper + WITNESS_TOLERANCE
+        for value, (lower, upper) in zip(input_values, input_bounds)
+    )
+    first_outputs = forward_values(first_network, input_values)
+    second_outputs = forward_values(second_network, input_values)
+    witness_margin = max(
+        first_output - second_output
+        for first_output, second_output in zip(first_outputs, second_outputs)
+    )
+    target_verified = witness_margin >= instance.epsilon - WITNESS_TOLERANCE
+    witness_verified = input_verified and target_verified
+    if not witness_verified:
+        print(
+            "Solver returned a feasible point, but the numeric witness did not "
+            f"verify. direction={first_network_name}-{second_network_name}, "
+            f"witness_margin={witness_margin}, required_margin={instance.epsilon}, "
+            f"target_verified={target_verified}, input_verified={input_verified}",
+            file=sys.stderr,
+        )
+
+
+def solve_instance_direction(
     instance: Instance,
     solver_name: str,
     first_network_name: str,
@@ -313,8 +368,19 @@ def solve_differential_model(
     start_time = time.perf_counter()
     result = solver.solve(model, tee=False, load_solutions=False)
     runtime_sec = time.perf_counter() - start_time
+    status = status_from_pyomo(result.solver.termination_condition)
+    if status == "sat":
+        model.solutions.load_from(result)
+        validate_directional_witness(
+            instance,
+            input_vars,
+            first_network_name,
+            second_network_name,
+            first_network,
+            second_network,
+        )
 
-    return status_from_pyomo(result.solver.termination_condition), runtime_sec
+    return status, runtime_sec
 
 
 def combine_directional_statuses(statuses: list[InstanceStatus]) -> InstanceStatus:
@@ -330,7 +396,7 @@ def combine_directional_statuses(statuses: list[InstanceStatus]) -> InstanceStat
 def run_instance(instance: Instance, solver_name: str) -> InstanceResult:
     validate_instance(instance)
 
-    first_status, first_runtime = solve_differential_model(
+    first_status, first_runtime = solve_instance_direction(
         instance,
         solver_name,
         "nn1",
@@ -338,7 +404,7 @@ def run_instance(instance: Instance, solver_name: str) -> InstanceResult:
         instance.nn1,
         instance.nn2,
     )
-    second_status, second_runtime = solve_differential_model(
+    second_status, second_runtime = solve_instance_direction(
         instance,
         solver_name,
         "nn2",
