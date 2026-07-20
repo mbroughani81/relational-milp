@@ -4,7 +4,7 @@ import gurobipy as gp
 from nn_equivalence.generator import generate_dnn_pair
 from nn_equivalence.nn_loader import load_linear_layers, load_nn_pair_1, load_nn_pair_2
 from nn_equivalence.nn_types import LinearLayer
-import nn_equivalence.encoder as encoder
+import nn_equivalence.encoder_gurobi as encoder
 
 def main() -> None:
     # pair = generate_dnn_pair(

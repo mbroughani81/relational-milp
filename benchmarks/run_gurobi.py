@@ -15,7 +15,7 @@ from benchmarks.common import (
     parse_suite_options,
     validate_instance,
 )
-import nn_equivalence.encoder as encoder
+import nn_equivalence.encoder_gurobi as encoder
 from nn_equivalence.nn_types import NeuralNetwork
 
 def load_suite(name: str, suite_options: SuiteOptions) -> InstanceSuite:

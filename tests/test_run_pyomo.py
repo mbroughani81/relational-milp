@@ -1,7 +1,7 @@
 import pyomo.environ as pyo
 
 from benchmarks.common import InputRegion, Instance
-from benchmarks.run_pyomo import validate_directional_witness
+from nn_equivalence.encoder_pyomo import validate_directional_witness
 
 
 def make_instance(epsilon: float) -> Instance:
