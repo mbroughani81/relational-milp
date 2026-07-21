@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import importlib
+from pathlib import Path
+import re
 import sys
 import time
 from typing import Any
@@ -62,6 +64,23 @@ def parse_args() -> argparse.Namespace:
             "contain commas, e.g. --suite-options modes=global,three_pixel."
         ),
     )
+    parser.add_argument(
+        "--solver-tee",
+        action="store_true",
+        help=(
+            "Print backend solver logs interactively. This may mix solver logs "
+            "with CSV output on stdout; use --solver-log-dir to keep logs separate."
+        ),
+    )
+    parser.add_argument(
+        "--solver-log-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for backend solver logs. Writes one log file per "
+            "instance direction and keeps CSV results on stdout."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -87,6 +106,24 @@ def create_solver(solver_name: str, timeout_sec: float) -> Any:
     return solver
 
 
+def set_solver_log_file(solver: Any, solver_name: str, logfile: Path) -> None:
+    if not hasattr(solver, "options"):
+        raise RuntimeError(
+            f"Pyomo solver '{solver_name}' does not support solver log files."
+        )
+    if solver_name == "gurobi":
+        solver.options["LogFile"] = str(logfile)
+    elif solver_name == "highs":
+        solver.options["log_file"] = str(logfile)
+        solver.options["output_flag"] = True
+    else:
+        raise RuntimeError(f"Unsupported solver for log files: {solver_name}")
+
+
+def safe_log_name(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
+
+
 def status_from_pyomo(termination_condition: TC) -> InstanceStatus:
     if termination_condition in {TC.optimal, TC.feasible, TC.globallyOptimal}:
         return "sat"
@@ -104,6 +141,8 @@ def solve_instance_direction(
     second_network_name: str,
     first_network: NeuralNetwork,
     second_network: NeuralNetwork,
+    solver_tee: bool,
+    solver_log_dir: Path | None,
 ) -> tuple[InstanceStatus, float]:
     model, input_vars = encoder.encode_instance_direction(
         instance,
@@ -113,10 +152,24 @@ def solve_instance_direction(
         second_network,
     )
     solver = create_solver(solver_name, instance.timeout_sec)
+    direction_name = f"{first_network_name}_minus_{second_network_name}"
+    logfile = None
+    if solver_log_dir is not None:
+        solver_log_dir.mkdir(parents=True, exist_ok=True)
+        logfile = solver_log_dir / (
+            f"{safe_log_name(instance.instance_id)}_{direction_name}.log"
+        )
+        set_solver_log_file(solver, solver_name, logfile)
+
     start_time = time.perf_counter()
-    result = solver.solve(model, tee=False, load_solutions=False)
+    result = solver.solve(
+        model,
+        tee=solver_tee,
+        load_solutions=False,
+    )
     runtime_sec = time.perf_counter() - start_time
     status = status_from_pyomo(result.solver.termination_condition)
+
     if status == "sat":
         model.solutions.load_from(result)
         encoder.validate_directional_witness(
@@ -141,7 +194,12 @@ def combine_directional_statuses(statuses: list[InstanceStatus]) -> InstanceStat
     return "unknown"
 
 
-def run_instance(instance: Instance, solver_name: str) -> InstanceResult:
+def run_instance(
+    instance: Instance,
+    solver_name: str,
+    solver_tee: bool = False,
+    solver_log_dir: Path | None = None,
+) -> InstanceResult:
     validate_instance(instance)
 
     first_status, first_runtime = solve_instance_direction(
@@ -151,6 +209,8 @@ def run_instance(instance: Instance, solver_name: str) -> InstanceResult:
         "nn2",
         instance.nn1,
         instance.nn2,
+        solver_tee,
+        solver_log_dir,
     )
     second_status, second_runtime = solve_instance_direction(
         instance,
@@ -159,6 +219,8 @@ def run_instance(instance: Instance, solver_name: str) -> InstanceResult:
         "nn1",
         instance.nn2,
         instance.nn1,
+        solver_tee,
+        solver_log_dir,
     )
     status = combine_directional_statuses([first_status, second_status])
 
@@ -177,7 +239,12 @@ def main() -> None:
     try:
         suite = load_suite(args.suite, parse_suite_options(args.suite_options))
         results = [
-            run_instance(instance, args.solver)
+            run_instance(
+                instance,
+                args.solver,
+                args.solver_tee,
+                args.solver_log_dir,
+            )
             for instance in suite.instances
         ]
     except RuntimeError as error:

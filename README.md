@@ -74,6 +74,16 @@ python3 -m benchmarks.run_pyomo --suite synthetic --solver highs > synthetic_hig
 python3 summarize_out_csv.py synthetic_highs.csv
 ```
 
+Save backend solver logs and per-direction wall-clock timings while keeping CSV
+results on stdout:
+
+```bash
+python3 -m benchmarks.run_pyomo \
+  --suite sample \
+  --solver highs \
+  --solver-log-dir artifacts/solver_logs/sample_highs
+```
+
 ## Current benchmark suites
 
 - `sample`: three tiny 2-input instances. Includes slightly different networks
@@ -90,4 +100,3 @@ python3 summarize_out_csv.py synthetic_highs.csv
   memory intensive.
 - `mnist`: compares trained MNIST model pairs from `models/nn_equivalence/` on
   small input boxes around MNIST test samples from `data/MNIST/`.
-
