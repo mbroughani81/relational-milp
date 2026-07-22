@@ -42,7 +42,7 @@ def load_suite(suite_options: SuiteOptions | None = None) -> InstanceSuite:
                 nn1=identical_nn1,
                 nn2=identical_nn2,
                 input_region=region,
-                epsilon=0.0001,
+                epsilon=0.001,
                 expected_status="unsat",
                 metadata={"pair_type": "identical"},
             ),

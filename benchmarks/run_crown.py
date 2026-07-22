@@ -7,8 +7,8 @@ import hashlib
 import importlib
 import io
 import json
-import re
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -30,175 +30,117 @@ from benchmarks.common import (
 )
 from nn_equivalence.nn_types import NeuralNetwork
 ARTIFACT_ROOT = Path("artifacts/abcrown_instances")
-ONNX_OPSET = 18
-BATCH_SIZE = 2048
+BATCH_SIZE = 512
 ConfigValue = str | int | float | bool | dict[str, "ConfigValue"]
 ConfigDict = dict[str, ConfigValue]
 
 
-ABCROWN_PROFILES: dict[str, ConfigDict] = {
-    # Full alpha-beta-CROWN pipeline: alpha-CROWN first, then beta-CROWN BaB.
-    "default": {
+ABCROWN_COMMON_CONFIG: ConfigDict = {
+    "general": {
+        "complete_verifier": "bab",
+        "device": "cpu",
+        "seed": 100,
+        "deterministic": True,
     },
+    "solver": {
+        "batch_size": BATCH_SIZE,
+        "alpha-crown": {
+            "iteration": 100,
+            "lr_alpha": 0.1,
+        },
+        "beta-crown": {
+            "iteration": 50,
+            "lr_alpha": 0.01,
+            "lr_beta": 0.05,
+            "lr_decay": 0.98,
+        },
+    },
+    "bab": {
+        "timeout": 600,
+    },
+    "attack": {
+        "pgd_order": "before",
+        "pgd_steps": 100,
+        "pgd_restarts": 30,
+    },
+}
 
-    # Incomplete baselines. They can prove safety, but return unknown when
-    # their relaxation is not strong enough.
-    "crown_only": {
-        "general": {
-            "complete_verifier": "skip",
-            "enable_incomplete_verification": True,
-        },
-        "solver": {
-            "bound_prop_method": "crown",
-        },
-    },
-    "alpha_only": {
-        "general": {
-            "complete_verifier": "skip",
-            "enable_incomplete_verification": True,
-        },
+
+ABCROWN_PROFILES: dict[str, ConfigDict] = {
+    # Standard beta-CROWN BaB: ReLU splitting with the balanced kFSB heuristic.
+    "relu-kfsb": {
         "solver": {
             "bound_prop_method": "alpha-crown",
-            "alpha-crown": {
-                "iteration": 100,
-                "lr_alpha": 0.1,
-            },
         },
-    },
-
-    # Complete beta-CROWN variants with different optimization budgets.
-    "beta_fast": {
-        "solver": {
-            "alpha-crown": {
-                "iteration": 50,
-            },
-            "beta-crown": {
-                "iteration": 10,
-            },
-        },
-        "bab": {
-            "branching": {
-                "method": "kfsb",
-                "candidates": 1,
-            },
-        },
-    },
-    "beta_strong": {
-        "solver": {
-            "alpha-crown": {
-                "iteration": 200,
-                "lr_decay": 0.99,
-            },
-            "beta-crown": {
-                "iteration": 100,
-                "lr_decay": 0.99,
-            },
-        },
-        "bab": {
-            "branching": {
-                "method": "kfsb",
-                "candidates": 5,
-            },
-        },
-    },
-    "bab_no_incomplete": {
-        "general": {
-            "enable_incomplete_verification": False,
-        },
-    },
-    "clip_and_verify": {
-        "bab": {
-            "clip_n_verify": {
-                "clip_input_domain": {
-                    "enabled": True,
-                    "clip_type": "relaxed",
-                    "clip_iterations": 1,
-                },
-                "clip_interm_domain": {
-                    "enabled": True,
-                    "with_input": True,
-                    "topk_objective": 20,
-                },
-            },
-        },
-    },
-    # Branching-heuristic comparison. Keep every other setting unchanged.
-    "branch_babsr": {
-        "bab": {
-            "branching": {
-                "method": "babsr",
-            },
-        },
-    },
-    "branch_kfsb": {
         "bab": {
             "branching": {
                 "method": "kfsb",
                 "candidates": 3,
+                "reduceop": "min",
             },
         },
     },
-    "branch_fsb": {
+    # Strong-branching beta-CROWN: spend more work per ReLU split decision.
+    "relu-fsb": {
+        "solver": {
+            "bound_prop_method": "alpha-crown",
+        },
         "bab": {
             "branching": {
                 "method": "fsb",
-                "candidates": 3,
+                "candidates": 10,
+                "reduceop": "min",
             },
         },
     },
-
-    # Counterexample search before formal verification.
-    "attack_heavy": {
-        "attack": {
-            "pgd_order": "before",
-            "pgd_steps": 200,
-            "pgd_restarts": 100,
-        },
-    },
-
-    # Branch over the input box instead of unstable ReLU phases.
-    "input_split": {
+    # Input-space BaB: split the shared input region instead of ReLU phases.
+    "input-split": {
         "solver": {
-            "bound_prop_method": "crown",
+            "bound_prop_method": "alpha-crown",
+            "init_bound_prop_method": "alpha-crown",
         },
         "bab": {
             "branching": {
                 "method": "sb",
                 "input_split": {
                     "enable": True,
+                    "split_partitions": 2,
                 },
             },
         },
     },
-
-    # Exact MIP baseline for small networks. Requires Gurobi (or change to SCIP).
-    "mip_small": {
-        "general": {
-            "complete_verifier": "mip",
-            "enable_incomplete_verification": False,
-        },
-        "solver": {
-            "mip": {
-                "mip_solver": "gurobi",
-                "formulation": "mip",
-                "parallel_solvers": 4,
-                "solver_threads": 1,
-            },
-        },
-    },
-
-    # Hybrid: MIP tightens intermediate bounds, then beta-CROWN BaB runs.
-    "bab_refine": {
+    # MIP-refined beta-CROWN BaB: tighten intermediate bounds before BaB.
+    "mip-refined-bab": {
         "general": {
             "complete_verifier": "bab-refine",
         },
         "solver": {
             "mip": {
                 "mip_solver": "gurobi",
-                "parallel_solvers": 4,
+                "parallel_solvers": 8,
                 "solver_threads": 1,
-                "refine_neuron_timeout": 5,
+                "refine_neuron_timeout": 15,
                 "refine_neuron_time_percentage": 0.5,
+            },
+        },
+        "bab": {
+            "branching": {
+                "method": "kfsb",
+                "candidates": 3,
+            },
+        },
+    },
+    # Direct complete MIP: delegate the exact piecewise-linear search to Gurobi.
+    "direct-mip": {
+        "general": {
+            "complete_verifier": "mip",
+        },
+        "solver": {
+            "mip": {
+                "mip_solver": "gurobi",
+                "formulation": "mip",
+                "parallel_solvers": 1,
+                "solver_threads": 8,
             },
         },
     },
@@ -237,9 +179,43 @@ class DifferenceNetwork(nn.Module):
         return self.nn1(x) - self.nn2(x)
 
 
+class SafetyMarginNetwork(nn.Module):
+    def __init__(self, nn1: NeuralNetwork, nn2: NeuralNetwork, epsilon: float) -> None:
+        super().__init__()
+        self.diff = DifferenceNetwork(nn1, nn2)
+        output_dim = len(nn1[-1][1])
+        self.margin = nn.Linear(output_dim, 2 * output_dim)
+        with torch.no_grad():
+            self.margin.weight.zero_()
+            self.margin.bias.fill_(epsilon)
+            for output_index in range(output_dim):
+                self.margin.weight[output_index, output_index] = -1.0
+                self.margin.weight[output_dim + output_index, output_index] = 1.0
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.margin(self.diff(x))
+
+
 def load_suite(name: str, suite_options: SuiteOptions) -> InstanceSuite:
     module = importlib.import_module(f"benchmarks.{name}")
     return module.load_suite(suite_options)
+
+
+def apply_timeout_override(
+    suite: InstanceSuite,
+    timeout_sec: float | None,
+) -> InstanceSuite:
+    if timeout_sec is None:
+        return suite
+    if timeout_sec <= 0:
+        raise ValueError("--timeout must be positive")
+    return replace(
+        suite,
+        instances=[
+            replace(instance, timeout_sec=timeout_sec)
+            for instance in suite.instances
+        ],
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -259,7 +235,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--profile",
-        default="beta_strong",
+        default="relu-kfsb",
         choices=sorted(ABCROWN_PROFILES),
         help="Named alpha-beta-CROWN configuration profile.",
     )
@@ -273,117 +249,51 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help=(
-            "Override every instance.timeout_sec before generating CROWN configs. "
+            "Override every instance.timeout_sec before running CROWN. "
             "Without this, each suite instance controls its own bab.timeout."
         ),
     )
     return parser.parse_args()
 
 
-def safe_name(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
-
-
 def model_key(instance: Instance) -> str:
-    payload = json.dumps([instance.nn1, instance.nn2], sort_keys=True)
+    payload = json.dumps([instance.nn1, instance.nn2, instance.epsilon], sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
-def export_model_once(
+def model_for_instance(
     instance: Instance,
-    model_dir: Path,
-    exported_models: dict[str, Path],
-) -> Path:
+    models: dict[str, SafetyMarginNetwork],
+) -> SafetyMarginNetwork:
     key = model_key(instance)
-    if key in exported_models:
-        return exported_models[key]
-
-    onnx_path = model_dir / f"diff_{key}.onnx"
-    input_dim = len(instance.input_region.lower_bounds)
-    model = DifferenceNetwork(instance.nn1, instance.nn2).eval()
-    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
-        io.StringIO()
-    ):
-        torch.onnx.export(
-            model,
-            torch.zeros(1, input_dim),
-            onnx_path,
-            input_names=["input"],
-            output_names=["diff"],
-            opset_version=ONNX_OPSET,
-        )
-    exported_models[key] = onnx_path
-    return onnx_path
+    if key not in models:
+        models[key] = SafetyMarginNetwork(
+            instance.nn1,
+            instance.nn2,
+            instance.epsilon,
+        ).eval()
+    return models[key]
 
 
-def write_vnnlib(path: Path, instance: Instance) -> None:
-    output_dim = len(instance.nn1[-1][1])
-    lines: list[str] = []
-
-    for i in range(len(instance.input_region.lower_bounds)):
-        lines.append(f"(declare-const X_{i} Real)")
-    lines.append("")
-    for i in range(output_dim):
-        lines.append(f"(declare-const Y_{i} Real)")
-    lines.append("")
-    lines.append("(assert (or")
-
-    for output_index in range(output_dim):
-        lines.append("  (and")
-        for input_index, (lower, upper) in enumerate(instance.input_region.bounds()):
-            lines.append(f"    (>= X_{input_index} {lower:.17g})")
-            lines.append(f"    (<= X_{input_index} {upper:.17g})")
-        lines.append(f"    (>= Y_{output_index} {instance.epsilon:.17g})")
-        lines.append("  )")
-
-        lines.append("  (and")
-        for input_index, (lower, upper) in enumerate(instance.input_region.bounds()):
-            lines.append(f"    (>= X_{input_index} {lower:.17g})")
-            lines.append(f"    (<= X_{input_index} {upper:.17g})")
-        lines.append(f"    (<= Y_{output_index} {-instance.epsilon:.17g})")
-        lines.append("  )")
-
-    lines.append("))")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def write_instances_csv(
-    path: Path,
-    rows: list[tuple[Path, Path, float]],
-    root_dir: Path,
-) -> None:
-    lines = []
-    for onnx_path, vnnlib_path, timeout in rows:
-        lines.append(
-            f"{onnx_path.relative_to(root_dir)},"
-            f"{vnnlib_path.relative_to(root_dir)},"
-            f"{timeout:.17g}\n"
-        )
-    path.write_text("".join(lines), encoding="utf-8")
-
-
-def write_manifest(path: Path, instances: list[Instance], rows: list[tuple[Path, Path, float]], root_dir: Path) -> None:
-    lines = ["index,instance_id,epsilon,expected_status,onnx,vnnlib,timeout\n"]
-    for index, (instance, (onnx_path, vnnlib_path, timeout)) in enumerate(
-        zip(instances, rows)
-    ):
+def write_manifest(path: Path, instances: list[Instance]) -> None:
+    lines = ["index,instance_id,epsilon,expected_status,timeout\n"]
+    for index, instance in enumerate(instances):
         expected = instance.expected_status or ""
         lines.append(
             f"{index},{instance.instance_id},{instance.epsilon:.17g},"
-            f"{expected},{onnx_path.relative_to(root_dir)},"
-            f"{vnnlib_path.relative_to(root_dir)},{timeout:.17g}\n"
+            f"{expected},{instance.timeout_sec:.17g}\n"
         )
     path.write_text("".join(lines), encoding="utf-8")
 
 
-def suite_output_dim(instances: list[Instance]) -> int:
+def suite_margin_output_dim(instances: list[Instance]) -> int:
     output_dims = {len(instance.nn1[-1][1]) for instance in instances}
     if len(output_dims) != 1:
         raise ValueError(
             "alpha-beta-CROWN config requires one data.num_outputs value; "
             f"got output dimensions {sorted(output_dims)}"
         )
-    return output_dims.pop()
+    return 2 * output_dims.pop()
 
 
 def merge_config(base: ConfigDict, override: ConfigDict) -> ConfigDict:
@@ -417,7 +327,6 @@ def config_to_yaml(config: ConfigDict, indent: int = 0) -> list[str]:
 
 def write_config(
     path: Path,
-    work_dir: Path,
     results_path: Path,
     output_dim: int,
     profile: str,
@@ -427,92 +336,168 @@ def write_config(
         raise ValueError("timeout_sec must be positive")
 
     base_config: ConfigDict = {
-        "general": {
-            "device": "cpu",
-            "complete_verifier": "bab",
-            "root_path": str(work_dir),
-            "csv_name": "instances.csv",
-            "results_file": str(results_path)
-        },
+        "general": {"results_file": str(results_path)},
         "data": {
             "num_outputs": output_dim,
         },
         "solver": {
             "batch_size": BATCH_SIZE,
         },
-        "bab": {
-            "timeout": timeout_sec
-        }
+        "bab": {"timeout": timeout_sec},
     }
-    config = merge_config(base_config, ABCROWN_PROFILES[profile])
+    config = merge_config(base_config, ABCROWN_COMMON_CONFIG)
+    config = merge_config(config, ABCROWN_PROFILES[profile])
     config.setdefault("bab", {})["timeout"] = timeout_sec
-    print("config => ", file=sys.stderr)
-    print(config, file=sys.stderr)
+    print("config => ")
+    print(config)
     path.write_text("\n".join(config_to_yaml(config)) + "\n", encoding="utf-8")
 
 
-def prepare_profile_runtime(profile: str) -> None:
-    if profile != "clip_and_verify":
-        return
-    if not torch.cuda.is_available():
-        raise RuntimeError(
-            "clip_and_verify currently requires CUDA in this alpha-beta-CROWN "
-            "checkout. Its intermediate clipping path calls torch.cuda APIs even "
-            "when general.device is cpu."
+def make_constraints(
+    instance: Instance,
+    input_vars_fn,
+    output_vars_fn,
+    constraints_cls,
+    *,
+    include_output_constraint: bool,
+):
+    input_dim = len(instance.input_region.lower_bounds)
+    output_dim = 2 * len(instance.nn1[-1][1])
+    x = input_vars_fn(input_dim)
+    y = output_vars_fn(output_dim)
+    lower = torch.tensor(instance.input_region.lower_bounds, dtype=torch.float32)
+    upper = torch.tensor(instance.input_region.upper_bounds, dtype=torch.float32)
+
+    input_constraint = (x >= lower) & (x <= upper)
+    if not include_output_constraint:
+        return (
+            x,
+            y,
+            constraints_cls(
+                input_vars=x,
+                input_constraint=input_constraint,
+            ),
         )
 
-    import beta_CROWN_solver
-    from auto_LiRPA.perturbations import PerturbationLpNorm
+    output_constraint = None
+    for output_index in range(output_dim):
+        positive_margin = y[output_index] > 0
+        output_constraint = (
+            positive_margin
+            if output_constraint is None
+            else output_constraint & positive_margin
+        )
 
-    beta_CROWN_solver.PerturbationLpNorm = PerturbationLpNorm
+    return (
+        x,
+        y,
+        constraints_cls(
+            input_vars=x,
+            output_vars=y,
+            input_constraint=input_constraint,
+            output_constraint=output_constraint,
+        ),
+    )
+
+
+def bounds_prove_equivalent(bounds_result) -> bool:
+    if not bounds_result.success:
+        return False
+    lower = bounds_result.lower.detach().cpu()
+    return bool(torch.all(lower > 0))
 
 
 def run_abcrown(
     config_path: Path,
     instances: list[Instance],
-    rows: list[tuple[Path, Path, float]],
     profile: str,
 ) -> tuple[int, str, dict[int, tuple[str, float]]]:
     captured = io.StringIO()
     results: dict[int, tuple[str, float]] = {}
     try:
         with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-            from abcrown import ABCrownSolver, ConfigBuilder, IOConstraints
+            from abcrown import (
+                ABCrownSolver,
+                ConfigBuilder,
+                IOConstraints,
+                input_vars,
+                output_vars,
+            )
 
-            prepare_profile_runtime(profile)
-            if len(rows) != len(instances):
-                raise ValueError(
-                    f"artifact row count ({len(rows)}) does not match instance "
-                    f"count ({len(instances)})"
-                )
-            output_dim = suite_output_dim(instances)
+            output_dim = suite_margin_output_dim(instances)
             work_dir = config_path.parent
-            for index, (instance, (onnx_path, vnnlib_path, _)) in enumerate(
-                zip(instances, rows)
-            ):
+            models: dict[str, SafetyMarginNetwork] = {}
+            for index, instance in enumerate(instances):
                 instance_config_path = work_dir / f"abcrown_config_instance_{index}.yaml"
                 instance_results_path = work_dir / f"abcrown_results_{index}.txt"
                 write_config(
                     instance_config_path,
-                    work_dir,
                     instance_results_path,
                     output_dim,
                     profile,
                     instance.timeout_sec,
                 )
                 config = ConfigBuilder.from_yaml(str(instance_config_path)).to_dict()
-                solve_result = ABCrownSolver(
-                    str(onnx_path),
-                    constraint=IOConstraints(vnnlib_path=str(vnnlib_path)),
-                    config=config,
-                    name=f"{instance.suite_name}/{instance.instance_id}",
-                ).verify()
+                start_time = time.perf_counter()
+                try:
+                    x, y, constraints = make_constraints(
+                        instance,
+                        input_vars,
+                        output_vars,
+                        IOConstraints,
+                        include_output_constraint=True,
+                    )
+                    model = model_for_instance(instance, models)
+                    solver = ABCrownSolver(
+                        model,
+                        x,
+                        y,
+                        config=config,
+                        name=f"{instance.suite_name}/{instance.instance_id}",
+                    )
+                    solve_result = solver.verify(constraints=constraints)
+                    if solve_result.status == "unknown":
+                        x, y, input_constraints = make_constraints(
+                            instance,
+                            input_vars,
+                            output_vars,
+                            IOConstraints,
+                            include_output_constraint=False,
+                        )
+                        bounds_result = ABCrownSolver(
+                            model,
+                            x,
+                            y,
+                            config=config,
+                            name=f"{instance.suite_name}/{instance.instance_id}/bounds",
+                        ).compute_bounds(
+                            constraints=input_constraints,
+                            objective=[y[i] for i in range(output_dim)],
+                        )
+                        if bounds_prove_equivalent(bounds_result):
+                            solve_result.status = "verified-by-bounds"
+                            solve_result.success = True
+                            solve_result.stats["elapsed"] = (
+                                time.perf_counter() - start_time
+                            )
+                except Exception:
+                    runtime = time.perf_counter() - start_time
+                    traceback_path = instance_results_path.with_suffix(".traceback.txt")
+                    traceback_path.write_text(traceback.format_exc(), encoding="utf-8")
+                    instance_results_path.write_text(
+                        f"{index},error,False,{runtime:.6f}\n",
+                        encoding="utf-8",
+                    )
+                    results[index] = ("error", runtime)
+                    print(traceback.format_exc(), end="")
+                    continue
+
+                runtime = float(solve_result.stats.get("elapsed") or 0.0)
                 instance_results_path.write_text(
                     f"{index},{solve_result.status},{solve_result.success},"
-                    f"{float(solve_result.stats.get('elapsed') or 0.0):.6f}\n",
+                    f"{runtime:.6f}\n",
                     encoding="utf-8",
                 )
-                runtime = float(solve_result.stats.get("elapsed") or 0.0)
                 results[index] = (solve_result.status, runtime)
     except Exception:
         output = captured.getvalue() + traceback.format_exc()
@@ -522,7 +507,13 @@ def run_abcrown(
 
 
 def instance_status_from_abcrown(status: str | None) -> InstanceStatus:
-    if status in {"safe", "safe-incomplete", "unsat", "verified"}:
+    if status in {
+        "safe",
+        "safe-incomplete",
+        "unsat",
+        "verified",
+        "verified-by-bounds",
+    }:
         return "unsat"
     if status in {"unsafe-pgd", "unsafe-bab", "sat", "falsified"}:
         return "sat"
@@ -554,37 +545,24 @@ def print_results(results: list[InstanceResult], abcrown_statuses: list[str]) ->
 def prepare_artifacts(
     suite: InstanceSuite,
     profile: str,
-) -> tuple[Path, list[Instance], list[tuple[Path, Path, float]]]:
+) -> tuple[Path, list[Instance]]:
     work_dir = (ARTIFACT_ROOT / suite.name / profile).resolve()
-    model_dir = work_dir / "models"
-    spec_dir = work_dir / "vnnlib"
-    model_dir.mkdir(parents=True, exist_ok=True)
-    spec_dir.mkdir(parents=True, exist_ok=True)
-
-    rows: list[tuple[Path, Path, float]] = []
-    exported_models: dict[str, Path] = {}
+    work_dir.mkdir(parents=True, exist_ok=True)
 
     for instance in suite.instances:
         validate_instance(instance)
-        onnx_path = export_model_once(instance, model_dir, exported_models)
-        vnnlib_path = spec_dir / f"{safe_name(instance.instance_id)}.vnnlib"
-        write_vnnlib(vnnlib_path, instance)
-        rows.append((onnx_path, vnnlib_path, instance.timeout_sec))
 
-    instances_path = work_dir / "instances.csv"
     manifest_path = work_dir / "instance_manifest.csv"
     config_path = work_dir / "abcrown_config.yaml"
-    write_instances_csv(instances_path, rows, work_dir)
-    write_manifest(manifest_path, suite.instances, rows, work_dir)
+    write_manifest(manifest_path, suite.instances)
     write_config(
         config_path,
-        work_dir,
         work_dir / "abcrown_results.txt",
-        suite_output_dim(suite.instances),
+        suite_margin_output_dim(suite.instances),
         profile,
         max(instance.timeout_sec for instance in suite.instances),
     )
-    return config_path, suite.instances, rows
+    return config_path, suite.instances
 
 
 def build_results(
@@ -621,12 +599,15 @@ def main() -> None:
             print(profile)
         return
 
-    suite = load_suite(args.suite, parse_suite_options(args.suite_options))
-    config_path, instances, rows = prepare_artifacts(suite, args.profile)
-    returncode, output, abcrown_result_by_index = run_abcrown(
-        config_path, instances, rows, args.profile
+    suite = apply_timeout_override(
+        load_suite(args.suite, parse_suite_options(args.suite_options)),
+        args.timeout,
     )
-    if returncode != 0:
+    config_path, instances = prepare_artifacts(suite, args.profile)
+    returncode, output, abcrown_result_by_index = run_abcrown(
+        config_path, instances, args.profile
+    )
+    if output:
         print(output, end="")
 
     results, abcrown_statuses = build_results(instances, abcrown_result_by_index)

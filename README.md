@@ -20,7 +20,8 @@ External solver/runtime requirements:
   `--solver gurobi`.
 - alpha-beta-CROWN: install alpha-beta-CROWN in the same Python
   environment so that `from abcrown import ABCrownSolver` works. The CROWN
-  runner exports ONNX/VNNLIB artifacts under `artifacts/abcrown_instances/`.
+  runner uses the high-level Python API and writes per-instance configs/results
+  under `artifacts/abcrown_instances/`.
 
 ## Run benchmarks
 
@@ -45,7 +46,7 @@ python3 -m benchmarks.run_gurobi --suite sample
 Run alpha-beta-CROWN:
 
 ```bash
-python3 -m benchmarks.run_crown --suite sample --profile beta_strong
+python3 -m benchmarks.run_crown --suite sample --profile relu-kfsb
 ```
 
 List the available alpha-beta-CROWN profiles:
