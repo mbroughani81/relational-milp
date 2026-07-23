@@ -8,6 +8,7 @@ from benchmarks.common import Instance
 from nn_equivalence.nn_types import Bounds, NeuralNetwork
 
 WITNESS_TOLERANCE = 1e-6
+BoundOverrides = dict[str, list[Bounds]]
 
 
 def affine_bounds(
@@ -36,6 +37,34 @@ def affine_bounds(
 
 def relu_bounds(z_bounds: Bounds) -> Bounds:
     return [(max(0.0, lower), max(0.0, upper)) for lower, upper in z_bounds]
+
+
+def tighten_bounds(interval_bounds: Bounds, override_bounds: Bounds | None) -> Bounds:
+    if override_bounds is None:
+        return interval_bounds
+    if len(interval_bounds) != len(override_bounds):
+        raise ValueError("bound override length does not match interval bounds")
+
+    tightened: Bounds = []
+    for (interval_lower, interval_upper), (override_lower, override_upper) in zip(
+        interval_bounds,
+        override_bounds,
+    ):
+        lower = max(interval_lower, override_lower)
+        upper = min(interval_upper, override_upper)
+        if lower > upper:
+            if lower - upper <= 1e-8:
+                midpoint = 0.5 * (lower + upper)
+                lower = midpoint
+                upper = midpoint
+            else:
+                raise ValueError(
+                    "bound override is inconsistent with interval bounds: "
+                    f"interval=({interval_lower}, {interval_upper}), "
+                    f"override=({override_lower}, {override_upper})"
+                )
+        tightened.append((lower, upper))
+    return tightened
 
 
 def affine_values(
@@ -123,12 +152,22 @@ def add_network_variables(
     nn: NeuralNetwork,
     name_prefix: str,
     input_bounds: Bounds,
+    bound_overrides: list[Bounds] | None = None,
 ) -> tuple[list[pyo.Var], Bounds]:
+    if bound_overrides is not None and len(bound_overrides) != len(nn):
+        raise ValueError(
+            f"{name_prefix} bound override layer count does not match network"
+        )
+
     current_bounds = input_bounds
     previous_vars = input_vars
 
     for layer_index, (weights, bias) in enumerate(nn, start=1):
-        z_bounds = affine_bounds(weights, bias, current_bounds)
+        interval_z_bounds = affine_bounds(weights, bias, current_bounds)
+        override_z_bounds = (
+            None if bound_overrides is None else bound_overrides[layer_index - 1]
+        )
+        z_bounds = tighten_bounds(interval_z_bounds, override_z_bounds)
         current_vars = add_vars(
             model,
             f"{name_prefix}_z{layer_index}",
@@ -207,6 +246,7 @@ def encode_instance_direction(
     second_network_name: str,
     first_network: NeuralNetwork,
     second_network: NeuralNetwork,
+    bound_overrides: BoundOverrides | None = None,
 ) -> tuple[pyo.ConcreteModel, list[pyo.Var]]:
     model = pyo.ConcreteModel(
         name=f"{instance.instance_id}_{first_network_name}_minus_{second_network_name}"
@@ -222,6 +262,7 @@ def encode_instance_direction(
         first_network,
         first_network_name,
         input_bounds,
+        None if bound_overrides is None else bound_overrides.get(first_network_name),
     )
     second_output_vars, second_output_bounds = add_network_variables(
         model,
@@ -230,6 +271,7 @@ def encode_instance_direction(
         second_network,
         second_network_name,
         input_bounds,
+        None if bound_overrides is None else bound_overrides.get(second_network_name),
     )
     add_output_distance_constraint(
         model,

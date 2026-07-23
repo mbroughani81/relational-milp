@@ -7,6 +7,7 @@ import re
 import sys
 import time
 from typing import Any
+from typing import Literal
 
 import pyomo.environ as pyo
 from pyomo.opt import TerminationCondition as TC
@@ -20,8 +21,16 @@ from benchmarks.common import (
     parse_suite_options,
     validate_instance,
 )
+from benchmarks.abcrown_bounds import (
+    ABCrownBoundCache,
+    ABCrownBoundOptions,
+    compute_network_bounds,
+)
 import nn_equivalence.encoder_pyomo as encoder
-from nn_equivalence.nn_types import NeuralNetwork
+from nn_equivalence.nn_types import Bounds, NeuralNetwork
+
+BoundTighteningMode = Literal["interval", "abcrown"]
+SolverName = Literal["highs", "gurobi", "cplex"]
 
 
 def load_suite(name: str, suite_options: SuiteOptions) -> InstanceSuite:
@@ -53,7 +62,11 @@ def parse_args() -> argparse.Namespace:
         description="Run an NN equivalence instance suite with Pyomo."
     )
     parser.add_argument("--suite", default="sample")
-    parser.add_argument("--solver", default="highs", choices=("highs", "gurobi"))
+    parser.add_argument(
+        "--solver",
+        default="highs",
+        choices=("highs", "gurobi", "cplex"),
+    )
     parser.add_argument(
         "--suite-options",
         action="append",
@@ -81,38 +94,138 @@ def parse_args() -> argparse.Namespace:
             "instance direction and keeps CSV results on stdout."
         ),
     )
+    parser.add_argument(
+        "--bound-tightening",
+        default="interval",
+        choices=("interval", "abcrown"),
+        help=(
+            "Bound source for Pyomo Big-M constants. 'interval' uses interval "
+            "arithmetic; 'abcrown' tightens interval bounds with certified "
+            "alpha-beta-CROWN compute_bounds results when available."
+        ),
+    )
+    parser.add_argument(
+        "--solver-threads",
+        type=int,
+        default=None,
+        help="Thread count passed to solvers that support it.",
+    )
+    parser.add_argument(
+        "--highs-parallel",
+        choices=("choose", "on", "off"),
+        default=None,
+        help="HiGHS parallel option. Use 'on' to force parallel mode.",
+    )
+    parser.add_argument(
+        "--highs-mip-heuristic-effort",
+        type=float,
+        default=None,
+        help="HiGHS MIP heuristic effort, e.g. 0.2.",
+    )
+    parser.add_argument(
+        "--progress",
+        action="store_true",
+        help=(
+            "Print one status line to stderr after each instance finishes. "
+            "Stdout remains the final CSV."
+        ),
+    )
     return parser.parse_args()
 
 
-def set_solver_timeout(solver: Any, solver_name: str, timeout_sec: float) -> None:
+def pyomo_solver_name(solver_name: SolverName) -> str:
+    if solver_name == "cplex":
+        return "cplex_direct"
+    return solver_name
+
+
+def set_solver_timeout(solver: Any, solver_name: SolverName, timeout_sec: float) -> None:
     if hasattr(solver, "options"):
         if solver_name == "gurobi":
             solver.options["TimeLimit"] = timeout_sec
+        elif solver_name == "cplex":
+            solver.options["timelimit"] = timeout_sec
         else:
             solver.options["time_limit"] = timeout_sec
     elif hasattr(solver, "config") and hasattr(solver.config, "time_limit"):
         solver.config.time_limit = timeout_sec
 
 
-def create_solver(solver_name: str, timeout_sec: float) -> Any:
-    solver = pyo.SolverFactory(solver_name)
+def set_solver_threads(
+    solver: Any,
+    solver_name: SolverName,
+    solver_threads: int | None,
+) -> None:
+    if solver_threads is None:
+        return
+    if solver_threads < 1:
+        raise ValueError("--solver-threads must be positive")
+    if solver_name == "gurobi":
+        solver.options["Threads"] = solver_threads
+    elif solver_name == "highs":
+        solver.options["threads"] = solver_threads
+    elif solver_name == "cplex":
+        solver.options["threads"] = solver_threads
+
+
+def set_highs_options(
+    solver: Any,
+    solver_name: SolverName,
+    highs_parallel: str | None,
+    highs_mip_heuristic_effort: float | None,
+) -> None:
+    if solver_name != "highs":
+        if highs_parallel is not None or highs_mip_heuristic_effort is not None:
+            raise ValueError("HiGHS-specific options require --solver highs")
+        return
+    if highs_parallel is not None:
+        solver.options["parallel"] = highs_parallel
+    if highs_mip_heuristic_effort is not None:
+        if highs_mip_heuristic_effort < 0:
+            raise ValueError("--highs-mip-heuristic-effort must be non-negative")
+        solver.options["mip_heuristic_effort"] = highs_mip_heuristic_effort
+
+
+def create_solver(
+    solver_name: SolverName,
+    timeout_sec: float,
+    solver_threads: int | None,
+    highs_parallel: str | None,
+    highs_mip_heuristic_effort: float | None,
+) -> Any:
+    backend_name = pyomo_solver_name(solver_name)
+    solver = pyo.SolverFactory(backend_name)
     if not solver.available(False):
         raise RuntimeError(
-            f"Pyomo solver '{solver_name}' is not available. "
-            "Install the solver backend and make it available to Pyomo."
+            f"Pyomo solver '{solver_name}' is not available through backend "
+            f"'{backend_name}'. Install the solver backend and make it "
+            "available to Pyomo."
         )
 
     set_solver_timeout(solver, solver_name, timeout_sec)
+    set_solver_threads(solver, solver_name, solver_threads)
+    set_highs_options(
+        solver,
+        solver_name,
+        highs_parallel,
+        highs_mip_heuristic_effort,
+    )
     return solver
 
 
-def set_solver_log_file(solver: Any, solver_name: str, logfile: Path) -> None:
+def set_solver_log_file(solver: Any, solver_name: SolverName, logfile: Path) -> None:
     if not hasattr(solver, "options"):
         raise RuntimeError(
             f"Pyomo solver '{solver_name}' does not support solver log files."
         )
     if solver_name == "gurobi":
         solver.options["LogFile"] = str(logfile)
+    elif solver_name == "cplex":
+        raise RuntimeError(
+            "--solver-log-dir is not supported for --solver cplex because this "
+            "runner uses Pyomo's cplex_direct backend. Use --solver-tee for "
+            "interactive CPLEX logs."
+        )
     elif solver_name == "highs":
         solver.options["log_file"] = str(logfile)
         solver.options["output_flag"] = True
@@ -143,6 +256,10 @@ def solve_instance_direction(
     second_network: NeuralNetwork,
     solver_tee: bool,
     solver_log_dir: Path | None,
+    bound_overrides: encoder.BoundOverrides | None,
+    solver_threads: int | None,
+    highs_parallel: str | None,
+    highs_mip_heuristic_effort: float | None,
 ) -> tuple[InstanceStatus, float]:
     model, input_vars = encoder.encode_instance_direction(
         instance,
@@ -150,8 +267,15 @@ def solve_instance_direction(
         second_network_name,
         first_network,
         second_network,
+        bound_overrides,
     )
-    solver = create_solver(solver_name, instance.timeout_sec)
+    solver = create_solver(
+        solver_name,
+        instance.timeout_sec,
+        solver_threads,
+        highs_parallel,
+        highs_mip_heuristic_effort,
+    )
     direction_name = f"{first_network_name}_minus_{second_network_name}"
     logfile = None
     if solver_log_dir is not None:
@@ -197,10 +321,22 @@ def combine_directional_statuses(statuses: list[InstanceStatus]) -> InstanceStat
 def run_instance(
     instance: Instance,
     solver_name: str,
+    bound_tightening: BoundTighteningMode,
+    abcrown_bound_cache: ABCrownBoundCache | None,
     solver_tee: bool = False,
     solver_log_dir: Path | None = None,
+    solver_threads: int | None = None,
+    highs_parallel: str | None = None,
+    highs_mip_heuristic_effort: float | None = None,
 ) -> InstanceResult:
     validate_instance(instance)
+    bounds_start = time.perf_counter()
+    bound_overrides = compute_bound_overrides(
+        instance,
+        bound_tightening,
+        abcrown_bound_cache,
+    )
+    bounds_runtime = time.perf_counter() - bounds_start
 
     first_status, first_runtime = solve_instance_direction(
         instance,
@@ -211,6 +347,10 @@ def run_instance(
         instance.nn2,
         solver_tee,
         solver_log_dir,
+        bound_overrides,
+        solver_threads,
+        highs_parallel,
+        highs_mip_heuristic_effort,
     )
     second_status, second_runtime = solve_instance_direction(
         instance,
@@ -221,6 +361,10 @@ def run_instance(
         instance.nn1,
         solver_tee,
         solver_log_dir,
+        bound_overrides,
+        solver_threads,
+        highs_parallel,
+        highs_mip_heuristic_effort,
     )
     status = combine_directional_statuses([first_status, second_status])
 
@@ -228,9 +372,54 @@ def run_instance(
         instance_id=instance.instance_id,
         suite_name=instance.suite_name,
         status=status,
-        runtime_sec=first_runtime + second_runtime,
+        runtime_sec=bounds_runtime + first_runtime + second_runtime,
         epsilon=instance.epsilon,
         expected_status=instance.expected_status,
+    )
+
+
+def compute_bound_overrides(
+    instance: Instance,
+    bound_tightening: BoundTighteningMode,
+    abcrown_bound_cache: ABCrownBoundCache | None,
+) -> encoder.BoundOverrides | None:
+    if bound_tightening == "interval":
+        return None
+    if bound_tightening != "abcrown":
+        raise ValueError(f"unsupported bound tightening mode: {bound_tightening}")
+
+    input_bounds: Bounds = instance.input_region.bounds()
+    options = ABCrownBoundOptions(timeout_sec=instance.timeout_sec)
+    overrides: encoder.BoundOverrides = {}
+
+    nn1_bounds = compute_network_bounds(
+        instance.nn1,
+        input_bounds,
+        options,
+        abcrown_bound_cache,
+    )
+    if nn1_bounds is not None:
+        overrides["nn1"] = nn1_bounds
+
+    nn2_bounds = compute_network_bounds(
+        instance.nn2,
+        input_bounds,
+        options,
+        abcrown_bound_cache,
+    )
+    if nn2_bounds is not None:
+        overrides["nn2"] = nn2_bounds
+
+    return overrides or None
+
+
+def print_progress(index: int, total: int, result: InstanceResult) -> None:
+    print(
+        f"[{index}/{total}] {result.instance_id}: "
+        f"status={result.status} expected={format_expected(result) or '-'} "
+        f"runtime_sec={result.runtime_sec:.3f} epsilon={result.epsilon:.17g}",
+        file=sys.stderr,
+        flush=True,
     )
 
 
@@ -238,15 +427,26 @@ def main() -> None:
     args = parse_args()
     try:
         suite = load_suite(args.suite, parse_suite_options(args.suite_options))
-        results = [
-            run_instance(
+        abcrown_bound_cache = (
+            ABCrownBoundCache() if args.bound_tightening == "abcrown" else None
+        )
+        results: list[InstanceResult] = []
+        total_instances = len(suite.instances)
+        for index, instance in enumerate(suite.instances, start=1):
+            result = run_instance(
                 instance,
                 args.solver,
+                args.bound_tightening,
+                abcrown_bound_cache,
                 args.solver_tee,
                 args.solver_log_dir,
+                args.solver_threads,
+                args.highs_parallel,
+                args.highs_mip_heuristic_effort,
             )
-            for instance in suite.instances
-        ]
+            results.append(result)
+            if args.progress:
+                print_progress(index, total_instances, result)
     except RuntimeError as error:
         print(error, file=sys.stderr)
         raise SystemExit(2) from error
