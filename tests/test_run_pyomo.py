@@ -1,4 +1,7 @@
+from typing import Any
+
 import pyomo.environ as pyo
+
 from benchmarks.common import (
     HalfSpace,
     Hyperrectangle,
@@ -20,7 +23,7 @@ def make_instance(epsilon: float) -> Instance:
     )
 
 
-def make_input_var(value: float) -> list[pyo.Var]:
+def make_input_var(value: float) -> list[Any]:
     model = pyo.ConcreteModel()
     model.x = pyo.Var([0], bounds=(0.0, 1.0), initialize=value)
     return [model.x[0]]

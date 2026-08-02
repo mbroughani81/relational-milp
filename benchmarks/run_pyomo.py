@@ -206,7 +206,7 @@ def status_from_pyomo(termination_condition: TC) -> InstanceStatus:
 
 def solve_instance_direction(
     instance: Instance,
-    solver_name: str,
+    solver_name: SolverName,
     first_network_name: str,
     second_network_name: str,
     first_network: NeuralNetwork,
@@ -286,7 +286,7 @@ def combine_directional_statuses(statuses: list[InstanceStatus]) -> InstanceStat
 
 def run_instance(
     instance: Instance,
-    solver_name: str,
+    solver_name: SolverName,
     bound_tightening: BoundTighteningMode,
     abcrown_bound_cache: ABCrownBoundCache | None,
     verbose: bool = False,

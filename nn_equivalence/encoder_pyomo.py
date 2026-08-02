@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import sys
+from typing import Any
 
 import pyomo.environ as pyo
+from pyomo.core.base.constraint import IndexedConstraint
 
 from nn_equivalence.nn_types import Bounds, NeuralNetwork
 from benchmarks.common import Hyperrectangle
@@ -12,6 +14,11 @@ from benchmarks.common import contains
 
 WITNESS_TOLERANCE = 1e-6
 BoundOverrides = dict[str, list[Bounds]]
+PyomoVar = Any
+
+
+def add_constraint(constraints: IndexedConstraint, expr: Any) -> None:
+    constraints.add(len(constraints), expr)
 
 
 def affine_bounds(
@@ -96,7 +103,7 @@ def add_vars(
     name: str,
     bounds: Bounds,
     domain: pyo.Set = pyo.Reals,
-) -> list[pyo.Var]:
+) -> list[PyomoVar]:
     component = pyo.Var(
         range(len(bounds)),
         domain=domain,
@@ -107,8 +114,8 @@ def add_vars(
 
 
 def add_input_region_constraints(
-    constraints: pyo.ConstraintList,
-    input_vars: list[pyo.Var],
+    constraints: IndexedConstraint,
+    input_vars: list[PyomoVar],
     instance: Instance,
 ) -> None:
     for region_constraint in constraints_list(instance.input_region):
@@ -116,18 +123,19 @@ def add_input_region_constraints(
             coefficient * input_vars[index]
             for index, coefficient in enumerate(region_constraint.a)
         )
-        constraints.add(expression <= region_constraint.b)
+        add_constraint(constraints, expression <= region_constraint.b)
 
 
 def add_affine_constraints(
-    constraints: pyo.ConstraintList,
-    output_vars: list[pyo.Var],
+    constraints: IndexedConstraint,
+    output_vars: list[PyomoVar],
     weights: list[list[float]],
-    input_vars: list[pyo.Var],
+    input_vars: list[PyomoVar],
     bias: list[float],
 ) -> None:
     for output_index, output_var in enumerate(output_vars):
-        constraints.add(
+        add_constraint(
+            constraints,
             output_var
             == sum(
                 weights[output_index][input_index] * input_vars[input_index]
@@ -139,9 +147,9 @@ def add_affine_constraints(
 
 def add_relu_big_m_constraints(
     model: pyo.ConcreteModel,
-    constraints: pyo.ConstraintList,
-    z_vars: list[pyo.Var],
-    a_vars: list[pyo.Var],
+    constraints: IndexedConstraint,
+    z_vars: list[PyomoVar],
+    a_vars: list[PyomoVar],
     z_bounds: Bounds,
     layer_name: str,
 ) -> None:
@@ -155,21 +163,21 @@ def add_relu_big_m_constraints(
     for index, (z_var, a_var) in enumerate(zip(z_vars, a_vars)):
         lower, upper = z_bounds[index]
 
-        constraints.add(a_var >= z_var)
-        constraints.add(a_var >= 0)
-        constraints.add(a_var <= z_var - lower * (1 - delta_vars[index]))
-        constraints.add(a_var <= upper * delta_vars[index])
+        add_constraint(constraints, a_var >= z_var)
+        add_constraint(constraints, a_var >= 0)
+        add_constraint(constraints, a_var <= z_var - lower * (1 - delta_vars[index]))
+        add_constraint(constraints, a_var <= upper * delta_vars[index])
 
 
 def add_network_variables(
     model: pyo.ConcreteModel,
-    constraints: pyo.ConstraintList,
-    input_vars: list[pyo.Var],
+    constraints: IndexedConstraint,
+    input_vars: list[PyomoVar],
     nn: NeuralNetwork,
     name_prefix: str,
     input_bounds: Bounds,
     bound_overrides: list[Bounds] | None = None,
-) -> tuple[list[pyo.Var], Bounds]:
+) -> tuple[list[PyomoVar], Bounds]:
     if bound_overrides is not None and len(bound_overrides) != len(nn):
         raise ValueError(
             f"{name_prefix} bound override layer count does not match network"
@@ -223,9 +231,9 @@ def add_network_variables(
 
 def add_output_distance_constraint(
     model: pyo.ConcreteModel,
-    constraints: pyo.ConstraintList,
-    first_output_vars: list[pyo.Var],
-    second_output_vars: list[pyo.Var],
+    constraints: IndexedConstraint,
+    first_output_vars: list[PyomoVar],
+    second_output_vars: list[PyomoVar],
     first_output_bounds: Bounds,
     second_output_bounds: Bounds,
     epsilon: float,
@@ -249,11 +257,12 @@ def add_output_distance_constraint(
         _, second_upper = second_output_bounds[index]
         min_difference = first_lower - second_upper
         big_m = max(0.0, epsilon - min_difference)
-        constraints.add(
+        add_constraint(
+            constraints,
             first_var - second_var >= epsilon - big_m * (1 - selectors[index])
         )
 
-    constraints.add(sum(selectors) >= 1)
+    add_constraint(constraints, sum(selectors) >= 1)
 
 
 def encode_instance_direction(
@@ -263,19 +272,20 @@ def encode_instance_direction(
     first_network: NeuralNetwork,
     second_network: NeuralNetwork,
     bound_overrides: BoundOverrides | None = None,
-) -> tuple[pyo.ConcreteModel, list[pyo.Var]]:
+) -> tuple[pyo.ConcreteModel, list[PyomoVar]]:
     model = pyo.ConcreteModel(
         name=f"{instance.instance_id}_{first_network_name}_minus_{second_network_name}"
     )
-    model.constraints = pyo.ConstraintList()
+    constraints: IndexedConstraint = IndexedConstraint(pyo.Any)
+    model.constraints = constraints
 
     input_box = Hyperrectangle.overapproximate(instance.input_region)
     input_bounds = input_box.bounds()
     input_vars = add_vars(model, "x", input_bounds)
-    add_input_region_constraints(model.constraints, input_vars, instance)
+    add_input_region_constraints(constraints, input_vars, instance)
     first_output_vars, first_output_bounds = add_network_variables(
         model,
-        model.constraints,
+        constraints,
         input_vars,
         first_network,
         first_network_name,
@@ -284,7 +294,7 @@ def encode_instance_direction(
     )
     second_output_vars, second_output_bounds = add_network_variables(
         model,
-        model.constraints,
+        constraints,
         input_vars,
         second_network,
         second_network_name,
@@ -293,7 +303,7 @@ def encode_instance_direction(
     )
     add_output_distance_constraint(
         model,
-        model.constraints,
+        constraints,
         first_output_vars,
         second_output_vars,
         first_output_bounds,
@@ -308,13 +318,18 @@ def encode_instance_direction(
 
 def validate_directional_witness(
     instance: Instance,
-    input_vars: list[pyo.Var],
+    input_vars: list[PyomoVar],
     first_network_name: str,
     second_network_name: str,
     first_network: NeuralNetwork,
     second_network: NeuralNetwork,
 ) -> None:
-    input_values = [float(pyo.value(var)) for var in input_vars]
+    input_values: list[float] = []
+    for var in input_vars:
+        value = pyo.value(var)
+        if value is None:
+            raise ValueError("solver returned a witness with an uninitialized input")
+        input_values.append(float(value))
     input_verified = contains(instance.input_region, input_values, WITNESS_TOLERANCE)
     first_outputs = forward_values(first_network, input_values)
     second_outputs = forward_values(second_network, input_values)
