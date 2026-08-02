@@ -10,15 +10,129 @@ InstanceStatus = Literal["sat", "unsat", "timeout", "unknown"]
 SuiteOptions = dict[str, str]
 
 
+class AbstractPolytope:
+    pass
+
+
 @dataclass(frozen=True)
-class InputRegion:
-    lower_bounds: list[float]
-    upper_bounds: list[float]
+class HalfSpace(AbstractPolytope):
+    a: list[float]
+    b: float
+
+    def validate_dimension(self, dimension: int) -> None:
+        if len(self.a) != dimension:
+            raise ValueError("halfspace dimension does not match input region")
+
+
+@dataclass(frozen=True)
+class Hyperrectangle(AbstractPolytope):
+    low: list[float]
+    high: list[float]
 
     def bounds(self) -> Bounds:
-        if len(self.lower_bounds) != len(self.upper_bounds):
+        if len(self.low) != len(self.high):
             raise ValueError("lower_bounds and upper_bounds must have the same length")
-        return list(zip(self.lower_bounds, self.upper_bounds))
+        region_bounds = list(zip(self.low, self.high))
+        for lower, upper in region_bounds:
+            if lower > upper:
+                raise ValueError("input lower bound exceeds upper bound")
+        return region_bounds
+
+    @staticmethod
+    def overapproximate(set_: AbstractPolytope) -> Hyperrectangle:
+        if isinstance(set_, Hyperrectangle):
+            return set_
+        if not isinstance(set_, HPolytope):
+            raise TypeError(f"unsupported polytope type: {type(set_).__name__}")
+
+        lower_bounds = [-float("inf")] * dim(set_)
+        upper_bounds = [float("inf")] * dim(set_)
+        for constraint in constraints_list(set_):
+            nonzero_indices = [
+                index
+                for index, coefficient in enumerate(constraint.a)
+                if coefficient != 0.0
+            ]
+            if len(nonzero_indices) != 1:
+                continue
+            index = nonzero_indices[0]
+            coefficient = constraint.a[index]
+            bound = constraint.b / coefficient
+            if coefficient > 0:
+                upper_bounds[index] = min(upper_bounds[index], bound)
+            else:
+                lower_bounds[index] = max(lower_bounds[index], bound)
+
+        for lower, upper in zip(lower_bounds, upper_bounds):
+            if lower > upper:
+                raise ValueError("input lower bound exceeds upper bound")
+            if lower == -float("inf") or upper == float("inf"):
+                raise ValueError(
+                    "HPolytope must include finite axis-aligned bounds to "
+                    "overapproximate it as a Hyperrectangle"
+                )
+        return Hyperrectangle(low=lower_bounds, high=upper_bounds)
+
+
+class HPolytope(AbstractPolytope):
+    def __init__(self, constraints: list[HalfSpace]) -> None:
+        if not all(isinstance(constraint, HalfSpace) for constraint in constraints):
+            raise ValueError("HPolytope constraints must be HalfSpace instances")
+        self.constraints = tuple(constraints)
+        dimensions = {len(constraint.a) for constraint in self.constraints}
+        if len(dimensions) != 1:
+            raise ValueError("HPolytope halfspaces must all have the same dimension")
+        self._dimension = dimensions.pop()
+
+
+def constraints_list(set_: AbstractPolytope | HalfSpace) -> tuple[HalfSpace, ...]:
+    if isinstance(set_, HalfSpace):
+        return (set_,)
+    if isinstance(set_, HPolytope):
+        for constraint in set_.constraints:
+            constraint.validate_dimension(set_._dimension)
+        return set_.constraints
+    if isinstance(set_, Hyperrectangle):
+        return ()
+    raise TypeError(f"unsupported polytope type: {type(set_).__name__}")
+
+
+def dim(set_: AbstractPolytope) -> int:
+    if isinstance(set_, HalfSpace):
+        return len(set_.a)
+    if isinstance(set_, Hyperrectangle):
+        return len(set_.low)
+    if isinstance(set_, HPolytope):
+        return set_._dimension
+    raise TypeError(f"unsupported polytope type: {type(set_).__name__}")
+
+
+def contains(
+    set_: AbstractPolytope,
+    values: list[float],
+    tolerance: float = 0.0,
+) -> bool:
+    if isinstance(set_, HalfSpace):
+        value = sum(
+            coefficient * input_value
+            for coefficient, input_value in zip(set_.a, values)
+        )
+        return value <= set_.b + tolerance
+
+    if len(values) != dim(set_):
+        return False
+    if isinstance(set_, Hyperrectangle):
+        region_bounds = set_.bounds()
+        bounds_satisfied = all(
+            lower - tolerance <= value <= upper + tolerance
+            for value, (lower, upper) in zip(values, region_bounds)
+        )
+        if not bounds_satisfied:
+            return False
+    return all(
+        contains(constraint, values, tolerance)
+        for constraint in constraints_list(set_)
+    )
 
 
 @dataclass(frozen=True)
@@ -27,7 +141,7 @@ class Instance:
     suite_name: str
     nn1: NeuralNetwork
     nn2: NeuralNetwork
-    input_region: InputRegion
+    input_region: AbstractPolytope
     epsilon: float
     expected_status: InstanceStatus | None = None
     timeout_sec: float = 30.0
@@ -41,8 +155,13 @@ class InstanceSuite:
 
 
 @dataclass(frozen=True)
-class InstanceStats:
-    pass
+class SolveStats:
+    name: str
+    timings: list[tuple[str, float]] = field(default_factory=list)
+
+    @property
+    def measured_total_sec(self) -> float:
+        return sum(runtime_sec for _, runtime_sec in self.timings)
 
 
 @dataclass(frozen=True)
@@ -53,7 +172,7 @@ class InstanceResult:
     runtime_sec: float
     epsilon: float
     expected_status: InstanceStatus | None
-    stats: InstanceStats = field(default_factory=InstanceStats)
+    stats: list[SolveStats] = field(default_factory=list)
 
     @property
     def matched_expected(self) -> bool | None:
@@ -97,7 +216,10 @@ def validate_instance(instance: Instance) -> None:
         raise ValueError("epsilon must be non-negative")
     if len(instance.nn1) != len(instance.nn2):
         raise ValueError("nn1 and nn2 must have the same number of layers")
-    if len(instance.nn1[0][0][0]) != len(instance.input_region.lower_bounds):
+    input_dimension = dim(instance.input_region)
+    constraints_list(instance.input_region)
+    Hyperrectangle.overapproximate(instance.input_region)
+    if len(instance.nn1[0][0][0]) != input_dimension:
         raise ValueError("input region dimension does not match network input size")
 
     for layer_index, ((weights1, bias1), (weights2, bias2)) in enumerate(

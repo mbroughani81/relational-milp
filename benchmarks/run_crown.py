@@ -22,11 +22,13 @@ import torch
 from torch import nn
 
 from benchmarks.common import (
+    Hyperrectangle,
     Instance,
     InstanceResult,
     InstanceStatus,
     InstanceSuite,
     SuiteOptions,
+    constraints_list,
     parse_suite_options,
     validate_instance,
 )
@@ -257,12 +259,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--progress",
+        "--verbose",
         action="store_true",
-        help=(
-            "Print one status line to stderr after each instance finishes. "
-            "Stdout remains the final CSV."
-        ),
+        help="Print alpha-beta-CROWN logs to stdout.",
+    )
+    parser.add_argument(
+        "--csv",
+        type=Path,
+        default=None,
+        help="Also write the final CSV results to this file.",
     )
     return parser.parse_args()
 
@@ -372,14 +377,22 @@ def make_constraints(
     *,
     include_output_constraint: bool,
 ):
-    input_dim = len(instance.input_region.lower_bounds)
+    input_box = Hyperrectangle.overapproximate(instance.input_region)
+    input_bounds = input_box.bounds()
+    input_dim = len(input_bounds)
     output_dim = 2 * len(instance.nn1[-1][1])
     x = input_vars_fn(input_dim)
     y = output_vars_fn(output_dim)
-    lower = torch.tensor(instance.input_region.lower_bounds, dtype=torch.float32)
-    upper = torch.tensor(instance.input_region.upper_bounds, dtype=torch.float32)
+    lower = torch.tensor([bound[0] for bound in input_bounds], dtype=torch.float32)
+    upper = torch.tensor([bound[1] for bound in input_bounds], dtype=torch.float32)
 
     input_constraint = (x >= lower) & (x <= upper)
+    for region_constraint in constraints_list(instance.input_region):
+        expression = sum(
+            coefficient * x[index]
+            for index, coefficient in enumerate(region_constraint.a)
+        )
+        input_constraint = input_constraint & (expression <= region_constraint.b)
     if not include_output_constraint:
         return (
             x,
@@ -558,10 +571,10 @@ def format_expected(result: InstanceResult) -> str:
     return f"{result.expected_status}:{matched}"
 
 
-def print_results(results: list[InstanceResult], abcrown_statuses: list[str]) -> None:
-    print("instance_id,status,abcrown_status,expected,runtime_sec,epsilon")
+def results_csv(results: list[InstanceResult], abcrown_statuses: list[str]) -> str:
+    lines = ["instance_id,status,abcrown_status,expected,runtime_sec,epsilon"]
     for result, abcrown_status in zip(results, abcrown_statuses):
-        print(
+        lines.append(
             f"{result.instance_id},"
             f"{result.status},"
             f"{abcrown_status},"
@@ -569,6 +582,20 @@ def print_results(results: list[InstanceResult], abcrown_statuses: list[str]) ->
             f"{result.runtime_sec:.6f},"
             f"{result.epsilon:.17g}"
         )
+    return "\n".join(lines) + "\n"
+
+
+def print_results(results: list[InstanceResult], abcrown_statuses: list[str]) -> None:
+    print(results_csv(results, abcrown_statuses), end="")
+
+
+def write_results_csv(
+    path: Path,
+    results: list[InstanceResult],
+    abcrown_statuses: list[str],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(results_csv(results, abcrown_statuses), encoding="utf-8")
 
 
 def print_progress(
@@ -659,7 +686,7 @@ def main() -> None:
         args.timeout,
     )
     config_path, instances = prepare_artifacts(suite, args.profile)
-    progress_stream = sys.stderr
+    progress_stream = sys.stdout
 
     def progress_callback(
         index: int,
@@ -681,13 +708,15 @@ def main() -> None:
         config_path,
         instances,
         args.profile,
-        progress_callback if args.progress else None,
+        progress_callback,
     )
-    if output:
+    if output and (args.verbose or returncode != 0):
         print(output, end="")
 
     results, abcrown_statuses = build_results(instances, abcrown_result_by_index)
     print_results(results, abcrown_statuses)
+    if args.csv is not None:
+        write_results_csv(args.csv, results, abcrown_statuses)
     raise SystemExit(returncode)
 
 

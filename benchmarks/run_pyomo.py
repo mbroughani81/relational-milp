@@ -5,7 +5,6 @@ from dataclasses import dataclass
 import importlib
 from pathlib import Path
 import re
-import sys
 import time
 from typing import Any
 from typing import Literal
@@ -13,58 +12,27 @@ from typing import Literal
 import pyomo.environ as pyo
 from pyomo.opt import TerminationCondition as TC
 
-from benchmarks.common import (
-    Instance,
-    InstanceResult,
-    InstanceStats,
-    InstanceStatus,
-    InstanceSuite,
-    SuiteOptions,
-    parse_suite_options,
-    validate_instance,
-)
 from benchmarks.abcrown_bounds import (
     ABCrownBoundCache,
     ABCrownBoundOptions,
     compute_network_bounds,
+)
+from benchmarks.common import (
+    Hyperrectangle,
+    Instance,
+    InstanceResult,
+    InstanceStatus,
+    InstanceSuite,
+    SolveStats,
+    SuiteOptions,
+    parse_suite_options,
+    validate_instance,
 )
 import nn_equivalence.encoder_pyomo as encoder
 from nn_equivalence.nn_types import Bounds, NeuralNetwork
 
 BoundTighteningMode = Literal["interval", "abcrown"]
 SolverName = Literal["highs", "gurobi", "cplex"]
-
-
-@dataclass(frozen=True)
-class PyomoInstanceStats(InstanceStats):
-    bounds_nn1_sec: float
-    bounds_nn2_sec: float
-    encode_first_sec: float
-    solver_setup_first_sec: float
-    solve_first_sec: float
-    encode_second_sec: float
-    solver_setup_second_sec: float
-    solve_second_sec: float
-
-    @property
-    def bounds_sec(self) -> float:
-        return self.bounds_nn1_sec + self.bounds_nn2_sec
-
-    @property
-    def encode_sec(self) -> float:
-        return self.encode_first_sec + self.encode_second_sec
-
-    @property
-    def solver_setup_sec(self) -> float:
-        return self.solver_setup_first_sec + self.solver_setup_second_sec
-
-    @property
-    def solve_sec(self) -> float:
-        return self.solve_first_sec + self.solve_second_sec
-
-    @property
-    def measured_total_sec(self) -> float:
-        return self.bounds_sec + self.encode_sec + self.solver_setup_sec + self.solve_sec
 
 
 @dataclass(frozen=True)
@@ -77,9 +45,7 @@ class BoundOverrideResult:
 @dataclass(frozen=True)
 class DirectionResult:
     status: InstanceStatus
-    encode_runtime_sec: float
-    solver_setup_runtime_sec: float
-    solve_runtime_sec: float
+    stats: SolveStats
 
 
 def load_suite(name: str, suite_options: SuiteOptions) -> InstanceSuite:
@@ -94,16 +60,26 @@ def format_expected(result: InstanceResult) -> str:
     return f"{result.expected_status}:{matched}"
 
 
-def print_results(results: list[InstanceResult]) -> None:
-    print("instance_id,status,expected,runtime_sec,epsilon")
+def results_csv(results: list[InstanceResult]) -> str:
+    lines = ["instance_id,status,expected,runtime_sec,epsilon"]
     for result in results:
-        print(
+        lines.append(
             f"{result.instance_id},"
             f"{result.status},"
             f"{format_expected(result)},"
             f"{result.runtime_sec:.6f},"
             f"{result.epsilon:.17g}"
         )
+    return "\n".join(lines) + "\n"
+
+
+def print_results(results: list[InstanceResult]) -> None:
+    print(results_csv(results), end="")
+
+
+def write_results_csv(path: Path, results: list[InstanceResult]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(results_csv(results), encoding="utf-8")
 
 
 def parse_args() -> argparse.Namespace:
@@ -127,12 +103,9 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--solver-tee",
+        "--verbose",
         action="store_true",
-        help=(
-            "Print backend solver logs interactively. This may mix solver logs "
-            "with CSV output on stdout; use --solver-log-dir to keep logs separate."
-        ),
+        help="Print backend solver logs to stdout.",
     )
     parser.add_argument(
         "--solver-log-dir",
@@ -140,7 +113,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Directory for backend solver logs. Writes one log file per "
-            "instance direction and keeps CSV results on stdout."
+            "instance direction."
         ),
     )
     parser.add_argument(
@@ -154,30 +127,10 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--solver-threads",
-        type=int,
+        "--csv",
+        type=Path,
         default=None,
-        help="Thread count passed to solvers that support it.",
-    )
-    parser.add_argument(
-        "--highs-parallel",
-        choices=("choose", "on", "off"),
-        default=None,
-        help="HiGHS parallel option. Use 'on' to force parallel mode.",
-    )
-    parser.add_argument(
-        "--highs-mip-heuristic-effort",
-        type=float,
-        default=None,
-        help="HiGHS MIP heuristic effort, e.g. 0.2.",
-    )
-    parser.add_argument(
-        "--progress",
-        action="store_true",
-        help=(
-            "Print one status line to stderr after each instance finishes. "
-            "Stdout remains the final CSV."
-        ),
+        help="Also write the final CSV results to this file.",
     )
     return parser.parse_args()
 
@@ -200,47 +153,9 @@ def set_solver_timeout(solver: Any, solver_name: SolverName, timeout_sec: float)
         solver.config.time_limit = timeout_sec
 
 
-def set_solver_threads(
-    solver: Any,
-    solver_name: SolverName,
-    solver_threads: int | None,
-) -> None:
-    if solver_threads is None:
-        return
-    if solver_threads < 1:
-        raise ValueError("--solver-threads must be positive")
-    if solver_name == "gurobi":
-        solver.options["Threads"] = solver_threads
-    elif solver_name == "highs":
-        solver.options["threads"] = solver_threads
-    elif solver_name == "cplex":
-        solver.options["threads"] = solver_threads
-
-
-def set_highs_options(
-    solver: Any,
-    solver_name: SolverName,
-    highs_parallel: str | None,
-    highs_mip_heuristic_effort: float | None,
-) -> None:
-    if solver_name != "highs":
-        if highs_parallel is not None or highs_mip_heuristic_effort is not None:
-            raise ValueError("HiGHS-specific options require --solver highs")
-        return
-    if highs_parallel is not None:
-        solver.options["parallel"] = highs_parallel
-    if highs_mip_heuristic_effort is not None:
-        if highs_mip_heuristic_effort < 0:
-            raise ValueError("--highs-mip-heuristic-effort must be non-negative")
-        solver.options["mip_heuristic_effort"] = highs_mip_heuristic_effort
-
-
 def create_solver(
     solver_name: SolverName,
     timeout_sec: float,
-    solver_threads: int | None,
-    highs_parallel: str | None,
-    highs_mip_heuristic_effort: float | None,
 ) -> Any:
     backend_name = pyomo_solver_name(solver_name)
     solver = pyo.SolverFactory(backend_name)
@@ -252,13 +167,6 @@ def create_solver(
         )
 
     set_solver_timeout(solver, solver_name, timeout_sec)
-    set_solver_threads(solver, solver_name, solver_threads)
-    set_highs_options(
-        solver,
-        solver_name,
-        highs_parallel,
-        highs_mip_heuristic_effort,
-    )
     return solver
 
 
@@ -272,7 +180,7 @@ def set_solver_log_file(solver: Any, solver_name: SolverName, logfile: Path) -> 
     elif solver_name == "cplex":
         raise RuntimeError(
             "--solver-log-dir is not supported for --solver cplex because this "
-            "runner uses Pyomo's cplex_direct backend. Use --solver-tee for "
+            "runner uses Pyomo's cplex_direct backend. Use --verbose for "
             "interactive CPLEX logs."
         )
     elif solver_name == "highs":
@@ -303,12 +211,9 @@ def solve_instance_direction(
     second_network_name: str,
     first_network: NeuralNetwork,
     second_network: NeuralNetwork,
-    solver_tee: bool,
+    verbose: bool,
     solver_log_dir: Path | None,
     bound_overrides: encoder.BoundOverrides | None,
-    solver_threads: int | None,
-    highs_parallel: str | None,
-    highs_mip_heuristic_effort: float | None,
 ) -> DirectionResult:
     encode_start = time.perf_counter()
     model, input_vars = encoder.encode_instance_direction(
@@ -325,9 +230,6 @@ def solve_instance_direction(
     solver = create_solver(
         solver_name,
         instance.timeout_sec,
-        solver_threads,
-        highs_parallel,
-        highs_mip_heuristic_effort,
     )
     direction_name = f"{first_network_name}_minus_{second_network_name}"
     logfile = None
@@ -342,7 +244,7 @@ def solve_instance_direction(
     start_time = time.perf_counter()
     result = solver.solve(
         model,
-        tee=solver_tee,
+        tee=verbose,
         load_solutions=False,
     )
     runtime_sec = time.perf_counter() - start_time
@@ -361,9 +263,14 @@ def solve_instance_direction(
 
     return DirectionResult(
         status=status,
-        encode_runtime_sec=encode_runtime_sec,
-        solver_setup_runtime_sec=solver_setup_runtime_sec,
-        solve_runtime_sec=runtime_sec,
+        stats=SolveStats(
+            name=direction_name,
+            timings=[
+                ("encode", encode_runtime_sec),
+                ("solver_setup", solver_setup_runtime_sec),
+                ("solve", runtime_sec),
+            ],
+        ),
     )
 
 
@@ -382,11 +289,8 @@ def run_instance(
     solver_name: str,
     bound_tightening: BoundTighteningMode,
     abcrown_bound_cache: ABCrownBoundCache | None,
-    solver_tee: bool = False,
+    verbose: bool = False,
     solver_log_dir: Path | None = None,
-    solver_threads: int | None = None,
-    highs_parallel: str | None = None,
-    highs_mip_heuristic_effort: float | None = None,
 ) -> InstanceResult:
     validate_instance(instance)
     bound_result = compute_bound_overrides(
@@ -403,12 +307,9 @@ def run_instance(
         "nn2",
         instance.nn1,
         instance.nn2,
-        solver_tee,
+        verbose,
         solver_log_dir,
         bound_overrides,
-        solver_threads,
-        highs_parallel,
-        highs_mip_heuristic_effort,
     )
     second_result = solve_instance_direction(
         instance,
@@ -417,30 +318,32 @@ def run_instance(
         "nn1",
         instance.nn2,
         instance.nn1,
-        solver_tee,
+        verbose,
         solver_log_dir,
         bound_overrides,
-        solver_threads,
-        highs_parallel,
-        highs_mip_heuristic_effort,
     )
     status = combine_directional_statuses([first_result.status, second_result.status])
-    stats = PyomoInstanceStats(
-        bounds_nn1_sec=bound_result.nn1_runtime_sec,
-        bounds_nn2_sec=bound_result.nn2_runtime_sec,
-        encode_first_sec=first_result.encode_runtime_sec,
-        solver_setup_first_sec=first_result.solver_setup_runtime_sec,
-        solve_first_sec=first_result.solve_runtime_sec,
-        encode_second_sec=second_result.encode_runtime_sec,
-        solver_setup_second_sec=second_result.solver_setup_runtime_sec,
-        solve_second_sec=second_result.solve_runtime_sec,
-    )
+    stats = [
+        SolveStats(
+            name="bound_tightening",
+            timings=[
+                ("nn1", bound_result.nn1_runtime_sec),
+                ("nn2", bound_result.nn2_runtime_sec),
+            ],
+        ),
+        first_result.stats,
+        second_result.stats,
+    ]
 
     return InstanceResult(
         instance_id=instance.instance_id,
         suite_name=instance.suite_name,
         status=status,
-        runtime_sec=stats.bounds_sec + stats.solve_sec,
+        runtime_sec=(
+            bound_result.nn1_runtime_sec
+            + bound_result.nn2_runtime_sec
+            + timing_total(stats, "solve")
+        ),
         epsilon=instance.epsilon,
         expected_status=instance.expected_status,
         stats=stats,
@@ -461,7 +364,8 @@ def compute_bound_overrides(
     if bound_tightening != "abcrown":
         raise ValueError(f"unsupported bound tightening mode: {bound_tightening}")
 
-    input_bounds: Bounds = instance.input_region.bounds()
+    input_box = Hyperrectangle.overapproximate(instance.input_region)
+    input_bounds: Bounds = input_box.bounds()
     options = ABCrownBoundOptions(timeout_sec=instance.timeout_sec)
     overrides: encoder.BoundOverrides = {}
 
@@ -494,28 +398,37 @@ def compute_bound_overrides(
     )
 
 
+def timing_total(stats: list[SolveStats], phase_name: str) -> float:
+    return sum(
+        runtime_sec
+        for solve_stats in stats
+        for phase, runtime_sec in solve_stats.timings
+        if phase == phase_name
+    )
+
+
+def format_solve_stats(stats: list[SolveStats]) -> str:
+    parts = []
+    for solve_stats in stats:
+        timing_text = ",".join(
+            f"{phase}={runtime_sec:.3f}"
+            for phase, runtime_sec in solve_stats.timings
+        )
+        parts.append(f"{solve_stats.name}[{timing_text}]")
+    measured_total_sec = sum(solve_stats.measured_total_sec for solve_stats in stats)
+    parts.append(f"total={measured_total_sec:.3f}")
+    return " ".join(parts)
+
+
 def print_progress(index: int, total: int, result: InstanceResult) -> None:
     phase_text = ""
-    if isinstance(result.stats, PyomoInstanceStats):
-        phase_text = (
-            f" phases: bounds={result.stats.bounds_sec:.3f}"
-            f" bounds_nn1={result.stats.bounds_nn1_sec:.3f}"
-            f" bounds_nn2={result.stats.bounds_nn2_sec:.3f}"
-            f" encode={result.stats.encode_sec:.3f}"
-            f" encode_first={result.stats.encode_first_sec:.3f}"
-            f" encode_second={result.stats.encode_second_sec:.3f}"
-            f" solver_setup={result.stats.solver_setup_sec:.3f}"
-            f" solve={result.stats.solve_sec:.3f}"
-            f" solve_first={result.stats.solve_first_sec:.3f}"
-            f" solve_second={result.stats.solve_second_sec:.3f}"
-            f" measured_total={result.stats.measured_total_sec:.3f}"
-        )
+    if result.stats:
+        phase_text = f" phases: {format_solve_stats(result.stats)}"
     print(
         f"[{index}/{total}] {result.instance_id}: "
         f"status={result.status} expected={format_expected(result) or '-'} "
         f"runtime_sec={result.runtime_sec:.3f} epsilon={result.epsilon:.17g}"
         f"{phase_text}",
-        file=sys.stderr,
         flush=True,
     )
 
@@ -535,20 +448,18 @@ def main() -> None:
                 args.solver,
                 args.bound_tightening,
                 abcrown_bound_cache,
-                args.solver_tee,
+                args.verbose,
                 args.solver_log_dir,
-                args.solver_threads,
-                args.highs_parallel,
-                args.highs_mip_heuristic_effort,
             )
             results.append(result)
-            if args.progress:
-                print_progress(index, total_instances, result)
+            print_progress(index, total_instances, result)
     except RuntimeError as error:
-        print(error, file=sys.stderr)
+        print(error)
         raise SystemExit(2) from error
 
     print_results(results)
+    if args.csv is not None:
+        write_results_csv(args.csv, results)
 
 
 if __name__ == "__main__":

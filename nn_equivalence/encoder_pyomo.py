@@ -4,8 +4,11 @@ import sys
 
 import pyomo.environ as pyo
 
-from benchmarks.common import Instance
 from nn_equivalence.nn_types import Bounds, NeuralNetwork
+from benchmarks.common import Hyperrectangle
+from benchmarks.common import Instance
+from benchmarks.common import constraints_list
+from benchmarks.common import contains
 
 WITNESS_TOLERANCE = 1e-6
 BoundOverrides = dict[str, list[Bounds]]
@@ -101,6 +104,19 @@ def add_vars(
     )
     model.add_component(name, component)
     return [component[index] for index in range(len(bounds))]
+
+
+def add_input_region_constraints(
+    constraints: pyo.ConstraintList,
+    input_vars: list[pyo.Var],
+    instance: Instance,
+) -> None:
+    for region_constraint in constraints_list(instance.input_region):
+        expression = sum(
+            coefficient * input_vars[index]
+            for index, coefficient in enumerate(region_constraint.a)
+        )
+        constraints.add(expression <= region_constraint.b)
 
 
 def add_affine_constraints(
@@ -253,8 +269,10 @@ def encode_instance_direction(
     )
     model.constraints = pyo.ConstraintList()
 
-    input_bounds = instance.input_region.bounds()
+    input_box = Hyperrectangle.overapproximate(instance.input_region)
+    input_bounds = input_box.bounds()
     input_vars = add_vars(model, "x", input_bounds)
+    add_input_region_constraints(model.constraints, input_vars, instance)
     first_output_vars, first_output_bounds = add_network_variables(
         model,
         model.constraints,
@@ -297,11 +315,7 @@ def validate_directional_witness(
     second_network: NeuralNetwork,
 ) -> None:
     input_values = [float(pyo.value(var)) for var in input_vars]
-    input_bounds = instance.input_region.bounds()
-    input_verified = all(
-        lower - WITNESS_TOLERANCE <= value <= upper + WITNESS_TOLERANCE
-        for value, (lower, upper) in zip(input_values, input_bounds)
-    )
+    input_verified = contains(instance.input_region, input_values, WITNESS_TOLERANCE)
     first_outputs = forward_values(first_network, input_values)
     second_outputs = forward_values(second_network, input_values)
     witness_margin = max(

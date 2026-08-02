@@ -3,7 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
-from benchmarks.common import Instance, InstanceSuite, InputRegion, SuiteOptions
+from benchmarks.common import (
+    AbstractPolytope,
+    Hyperrectangle,
+    Instance,
+    InstanceSuite,
+    SuiteOptions,
+)
 from nn_equivalence.reludiff_nnet import (
     MNIST_RELUDIFF_NETWORKS,
     load_nnet_layers,
@@ -69,20 +75,20 @@ def _validate_network_names(network_names: tuple[str, ...]) -> None:
             raise ValueError(f"unknown ReluDiff MNIST network: {network_name}")
 
 
-def _global_region(raw_pixels: list[float], perturb: float) -> InputRegion:
-    return InputRegion(
-        lower_bounds=[max((pixel - perturb) / 255.0, 0.0) for pixel in raw_pixels],
-        upper_bounds=[min((pixel + perturb) / 255.0, 1.0) for pixel in raw_pixels],
+def _global_region(raw_pixels: list[float], perturb: float) -> AbstractPolytope:
+    return Hyperrectangle(
+        low=[max((pixel - perturb) / 255.0, 0.0) for pixel in raw_pixels],
+        high=[min((pixel + perturb) / 255.0, 1.0) for pixel in raw_pixels],
     )
 
 
-def _three_pixel_region(raw_pixels: list[float], pixel_ids: list[int]) -> InputRegion:
+def _three_pixel_region(raw_pixels: list[float], pixel_ids: list[int]) -> AbstractPolytope:
     lower_bounds = [pixel / 255.0 for pixel in raw_pixels]
     upper_bounds = [pixel / 255.0 for pixel in raw_pixels]
     for pixel_id in pixel_ids[:3]:
         lower_bounds[pixel_id] = 0.0
         upper_bounds[pixel_id] = 1.0
-    return InputRegion(lower_bounds=lower_bounds, upper_bounds=upper_bounds)
+    return Hyperrectangle(low=lower_bounds, high=upper_bounds)
 
 
 def _load_network_pairs(
