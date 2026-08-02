@@ -63,7 +63,7 @@ def relu_bounds(z_bounds: Bounds) -> Bounds:
     return [(max(0.0, lower), max(0.0, upper)) for lower, upper in z_bounds]
 
 
-def add_relu_big_m_constraints(
+def add_relu_bound_constraints(
     model: gp.Model,
     z_vars: list[gp.Var],
     a_vars: list[gp.Var],
@@ -159,7 +159,7 @@ def add_hidden_variables(
             model.addVar(lb=0.0, ub=max(0.0, upper), name=f"{name_prefix}_a{layer_index}_{i}")
             for i, (_, upper) in enumerate(z_bounds)
         ]
-        add_relu_big_m_constraints(
+        add_relu_bound_constraints(
             model=model,
             z_vars=current_vars,
             a_vars=current_activation_vars,

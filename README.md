@@ -37,7 +37,7 @@ Run the same suite through Pyomo, using Gurobi solver:
 python3 -m benchmarks.run_pyomo --suite sample --solver gurobi
 ```
 
-Tighten Pyomo Big-M bounds with alpha-beta-CROWN before solving:
+Tighten Pyomo ReLU pre-activation bounds with alpha-beta-CROWN before solving:
 
 ```bash
 python3 -m benchmarks.run_pyomo \

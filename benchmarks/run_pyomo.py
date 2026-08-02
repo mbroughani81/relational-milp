@@ -4,7 +4,6 @@ import argparse
 from dataclasses import dataclass
 import importlib
 from pathlib import Path
-import re
 import time
 from typing import Any
 from typing import Literal
@@ -36,8 +35,8 @@ SolverName = Literal["highs", "gurobi", "cplex"]
 
 
 @dataclass(frozen=True)
-class BoundOverrideResult:
-    overrides: encoder.BoundOverrides | None
+class BoundResult:
+    bounds: encoder.NetworkBounds
     nn1_runtime_sec: float
     nn2_runtime_sec: float
 
@@ -108,22 +107,13 @@ def parse_args() -> argparse.Namespace:
         help="Print backend solver logs to stdout.",
     )
     parser.add_argument(
-        "--solver-log-dir",
-        type=Path,
-        default=None,
-        help=(
-            "Directory for backend solver logs. Writes one log file per "
-            "instance direction."
-        ),
-    )
-    parser.add_argument(
         "--bound-tightening",
         default="interval",
         choices=("interval", "abcrown"),
         help=(
-            "Bound source for Pyomo Big-M constants. 'interval' uses interval "
-            "arithmetic; 'abcrown' tightens interval bounds with certified "
-            "alpha-beta-CROWN compute_bounds results when available."
+            "Bound source for Pyomo ReLU encodings. 'interval' uses interval "
+            "arithmetic; 'abcrown' tightens those bounds with certified "
+            "alpha-beta-CROWN compute_bounds results."
         ),
     )
     parser.add_argument(
@@ -170,30 +160,6 @@ def create_solver(
     return solver
 
 
-def set_solver_log_file(solver: Any, solver_name: SolverName, logfile: Path) -> None:
-    if not hasattr(solver, "options"):
-        raise RuntimeError(
-            f"Pyomo solver '{solver_name}' does not support solver log files."
-        )
-    if solver_name == "gurobi":
-        solver.options["LogFile"] = str(logfile)
-    elif solver_name == "cplex":
-        raise RuntimeError(
-            "--solver-log-dir is not supported for --solver cplex because this "
-            "runner uses Pyomo's cplex_direct backend. Use --verbose for "
-            "interactive CPLEX logs."
-        )
-    elif solver_name == "highs":
-        solver.options["log_file"] = str(logfile)
-        solver.options["output_flag"] = True
-    else:
-        raise RuntimeError(f"Unsupported solver for log files: {solver_name}")
-
-
-def safe_log_name(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
-
-
 def status_from_pyomo(termination_condition: TC) -> InstanceStatus:
     if termination_condition in {TC.optimal, TC.feasible, TC.globallyOptimal}:
         return "sat"
@@ -212,8 +178,7 @@ def solve_instance_direction(
     first_network: NeuralNetwork,
     second_network: NeuralNetwork,
     verbose: bool,
-    solver_log_dir: Path | None,
-    bound_overrides: encoder.BoundOverrides | None,
+    bounds: encoder.NetworkBounds,
 ) -> DirectionResult:
     encode_start = time.perf_counter()
     model, input_vars = encoder.encode_instance_direction(
@@ -222,7 +187,7 @@ def solve_instance_direction(
         second_network_name,
         first_network,
         second_network,
-        bound_overrides,
+        bounds,
     )
     encode_runtime_sec = time.perf_counter() - encode_start
 
@@ -231,14 +196,6 @@ def solve_instance_direction(
         solver_name,
         instance.timeout_sec,
     )
-    direction_name = f"{first_network_name}_minus_{second_network_name}"
-    logfile = None
-    if solver_log_dir is not None:
-        solver_log_dir.mkdir(parents=True, exist_ok=True)
-        logfile = solver_log_dir / (
-            f"{safe_log_name(instance.instance_id)}_{direction_name}.log"
-        )
-        set_solver_log_file(solver, solver_name, logfile)
     solver_setup_runtime_sec = time.perf_counter() - solver_setup_start
 
     start_time = time.perf_counter()
@@ -261,6 +218,7 @@ def solve_instance_direction(
             second_network,
         )
 
+    direction_name = f"{first_network_name}_minus_{second_network_name}"
     return DirectionResult(
         status=status,
         stats=SolveStats(
@@ -290,15 +248,14 @@ def run_instance(
     bound_tightening: BoundTighteningMode,
     abcrown_bound_cache: ABCrownBoundCache | None,
     verbose: bool = False,
-    solver_log_dir: Path | None = None,
 ) -> InstanceResult:
     validate_instance(instance)
-    bound_result = compute_bound_overrides(
+    bound_result = compute_bounds(
         instance,
         bound_tightening,
         abcrown_bound_cache,
     )
-    bound_overrides = bound_result.overrides
+    bounds = bound_result.bounds
 
     first_result = solve_instance_direction(
         instance,
@@ -308,8 +265,7 @@ def run_instance(
         instance.nn1,
         instance.nn2,
         verbose,
-        solver_log_dir,
-        bound_overrides,
+        bounds,
     )
     second_result = solve_instance_direction(
         instance,
@@ -319,8 +275,7 @@ def run_instance(
         instance.nn2,
         instance.nn1,
         verbose,
-        solver_log_dir,
-        bound_overrides,
+        bounds,
     )
     status = combine_directional_statuses([first_result.status, second_result.status])
     stats = [
@@ -350,49 +305,146 @@ def run_instance(
     )
 
 
-def compute_bound_overrides(
+def affine_bounds(
+    weights: list[list[float]],
+    bias: list[float],
+    input_bounds: Bounds,
+) -> Bounds:
+    output_bounds: Bounds = []
+
+    for row, bias_value in zip(weights, bias):
+        lower = bias_value
+        upper = bias_value
+        for weight, (input_lower, input_upper) in zip(row, input_bounds):
+            if weight >= 0:
+                lower += weight * input_lower
+                upper += weight * input_upper
+            else:
+                lower += weight * input_upper
+                upper += weight * input_lower
+        output_bounds.append((lower, upper))
+
+    return output_bounds
+
+
+def relu_bounds(z_bounds: Bounds) -> Bounds:
+    return [(max(0.0, lower), max(0.0, upper)) for lower, upper in z_bounds]
+
+
+def tighten_bounds(interval_bounds: Bounds, bound: Bounds | None) -> Bounds:
+    if bound is None:
+        return interval_bounds
+    if len(interval_bounds) != len(bound):
+        raise ValueError("bound length does not match interval bounds")
+
+    tightened: Bounds = []
+    for (interval_lower, interval_upper), (bound_lower, bound_upper) in zip(
+        interval_bounds,
+        bound,
+    ):
+        lower = max(interval_lower, bound_lower)
+        upper = min(interval_upper, bound_upper)
+        if lower > upper:
+            if lower - upper <= 1e-8:
+                midpoint = 0.5 * (lower + upper)
+                lower = midpoint
+                upper = midpoint
+            else:
+                raise ValueError(
+                    "bound is inconsistent with interval bounds: "
+                    f"interval=({interval_lower}, {interval_upper}), "
+                    f"bound=({bound_lower}, {bound_upper})"
+                )
+        tightened.append((lower, upper))
+    return tightened
+
+
+def compute_interval_bounds(
+    network: NeuralNetwork,
+    input_bounds: Bounds,
+    bounds: list[Bounds] | None = None,
+) -> list[Bounds]:
+    if not network:
+        raise ValueError("neural network must have at least one layer")
+    if bounds is not None and len(bounds) != len(network):
+        raise ValueError("bound layer count does not match network")
+
+    network_bounds: list[Bounds] = []
+    current_bounds = input_bounds
+    for layer_index, (weights, bias) in enumerate(network):
+        interval_z_bounds = affine_bounds(weights, bias, current_bounds)
+        bound = None if bounds is None else bounds[layer_index]
+        z_bounds = tighten_bounds(interval_z_bounds, bound)
+        network_bounds.append(z_bounds)
+        if layer_index != len(network) - 1:
+            current_bounds = relu_bounds(z_bounds)
+
+    return network_bounds
+
+
+def compute_bounds(
     instance: Instance,
     bound_tightening: BoundTighteningMode,
     abcrown_bound_cache: ABCrownBoundCache | None,
-) -> BoundOverrideResult:
+) -> BoundResult:
+    input_box = Hyperrectangle.overapproximate(instance.input_region)
+    input_bounds: Bounds = input_box.bounds()
+
     if bound_tightening == "interval":
-        return BoundOverrideResult(
-            overrides=None,
-            nn1_runtime_sec=0.0,
-            nn2_runtime_sec=0.0,
+        nn1_start = time.perf_counter()
+        nn1_bounds = compute_interval_bounds(instance.nn1, input_bounds)
+        nn1_runtime_sec = time.perf_counter() - nn1_start
+
+        nn2_start = time.perf_counter()
+        nn2_bounds = compute_interval_bounds(instance.nn2, input_bounds)
+        nn2_runtime_sec = time.perf_counter() - nn2_start
+
+        return BoundResult(
+            bounds={
+                "nn1": nn1_bounds,
+                "nn2": nn2_bounds,
+            },
+            nn1_runtime_sec=nn1_runtime_sec,
+            nn2_runtime_sec=nn2_runtime_sec,
         )
     if bound_tightening != "abcrown":
         raise ValueError(f"unsupported bound tightening mode: {bound_tightening}")
 
-    input_box = Hyperrectangle.overapproximate(instance.input_region)
-    input_bounds: Bounds = input_box.bounds()
     options = ABCrownBoundOptions(timeout_sec=instance.timeout_sec)
-    overrides: encoder.BoundOverrides = {}
 
     nn1_start = time.perf_counter()
-    nn1_bounds = compute_network_bounds(
+    nn1_abcrown_bounds = compute_network_bounds(
         instance.nn1,
         input_bounds,
         options,
         abcrown_bound_cache,
     )
+    nn1_bounds = compute_interval_bounds(
+        instance.nn1,
+        input_bounds,
+        nn1_abcrown_bounds,
+    )
     nn1_runtime_sec = time.perf_counter() - nn1_start
-    if nn1_bounds is not None:
-        overrides["nn1"] = nn1_bounds
 
     nn2_start = time.perf_counter()
-    nn2_bounds = compute_network_bounds(
+    nn2_abcrown_bounds = compute_network_bounds(
         instance.nn2,
         input_bounds,
         options,
         abcrown_bound_cache,
     )
+    nn2_bounds = compute_interval_bounds(
+        instance.nn2,
+        input_bounds,
+        nn2_abcrown_bounds,
+    )
     nn2_runtime_sec = time.perf_counter() - nn2_start
-    if nn2_bounds is not None:
-        overrides["nn2"] = nn2_bounds
 
-    return BoundOverrideResult(
-        overrides=overrides or None,
+    return BoundResult(
+        bounds={
+            "nn1": nn1_bounds,
+            "nn2": nn2_bounds,
+        },
         nn1_runtime_sec=nn1_runtime_sec,
         nn2_runtime_sec=nn2_runtime_sec,
     )
@@ -449,7 +501,6 @@ def main() -> None:
                 args.bound_tightening,
                 abcrown_bound_cache,
                 args.verbose,
-                args.solver_log_dir,
             )
             results.append(result)
             print_progress(index, total_instances, result)

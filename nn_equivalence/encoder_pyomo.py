@@ -13,7 +13,7 @@ from benchmarks.common import constraints_list
 from benchmarks.common import contains
 
 WITNESS_TOLERANCE = 1e-6
-BoundOverrides = dict[str, list[Bounds]]
+NetworkBounds = dict[str, list[Bounds]]
 PyomoVar = Any
 
 
@@ -21,60 +21,8 @@ def add_constraint(constraints: IndexedConstraint, expr: Any) -> None:
     constraints.add(len(constraints), expr)
 
 
-def affine_bounds(
-    weights: list[list[float]],
-    bias: list[float],
-    input_bounds: Bounds,
-) -> Bounds:
-    output_bounds: Bounds = []
-
-    for row, bias_value in zip(weights, bias):
-        lower = bias_value
-        upper = bias_value
-
-        for weight, (input_lower, input_upper) in zip(row, input_bounds):
-            if weight >= 0:
-                lower += weight * input_lower
-                upper += weight * input_upper
-            else:
-                lower += weight * input_upper
-                upper += weight * input_lower
-
-        output_bounds.append((lower, upper))
-
-    return output_bounds
-
-
 def relu_bounds(z_bounds: Bounds) -> Bounds:
     return [(max(0.0, lower), max(0.0, upper)) for lower, upper in z_bounds]
-
-
-def tighten_bounds(interval_bounds: Bounds, override_bounds: Bounds | None) -> Bounds:
-    if override_bounds is None:
-        return interval_bounds
-    if len(interval_bounds) != len(override_bounds):
-        raise ValueError("bound override length does not match interval bounds")
-
-    tightened: Bounds = []
-    for (interval_lower, interval_upper), (override_lower, override_upper) in zip(
-        interval_bounds,
-        override_bounds,
-    ):
-        lower = max(interval_lower, override_lower)
-        upper = min(interval_upper, override_upper)
-        if lower > upper:
-            if lower - upper <= 1e-8:
-                midpoint = 0.5 * (lower + upper)
-                lower = midpoint
-                upper = midpoint
-            else:
-                raise ValueError(
-                    "bound override is inconsistent with interval bounds: "
-                    f"interval=({interval_lower}, {interval_upper}), "
-                    f"override=({override_lower}, {override_upper})"
-                )
-        tightened.append((lower, upper))
-    return tightened
 
 
 def affine_values(
@@ -145,7 +93,7 @@ def add_affine_constraints(
         )
 
 
-def add_relu_big_m_constraints(
+def add_relu_bound_constraints(
     model: pyo.ConcreteModel,
     constraints: IndexedConstraint,
     z_vars: list[PyomoVar],
@@ -175,23 +123,15 @@ def add_network_variables(
     input_vars: list[PyomoVar],
     nn: NeuralNetwork,
     name_prefix: str,
-    input_bounds: Bounds,
-    bound_overrides: list[Bounds] | None = None,
+    bound: list[Bounds],
 ) -> tuple[list[PyomoVar], Bounds]:
-    if bound_overrides is not None and len(bound_overrides) != len(nn):
-        raise ValueError(
-            f"{name_prefix} bound override layer count does not match network"
-        )
+    if len(bound) != len(nn):
+        raise ValueError(f"{name_prefix} bound layer count does not match network")
 
-    current_bounds = input_bounds
     previous_vars = input_vars
 
     for layer_index, (weights, bias) in enumerate(nn, start=1):
-        interval_z_bounds = affine_bounds(weights, bias, current_bounds)
-        override_z_bounds = (
-            None if bound_overrides is None else bound_overrides[layer_index - 1]
-        )
-        z_bounds = tighten_bounds(interval_z_bounds, override_z_bounds)
+        z_bounds = bound[layer_index - 1]
         current_vars = add_vars(
             model,
             f"{name_prefix}_z{layer_index}",
@@ -215,7 +155,7 @@ def add_network_variables(
             f"{name_prefix}_a{layer_index}",
             current_activation_bounds,
         )
-        add_relu_big_m_constraints(
+        add_relu_bound_constraints(
             model,
             constraints,
             current_vars,
@@ -224,7 +164,6 @@ def add_network_variables(
             layer_name=f"{name_prefix}_layer_{layer_index}",
         )
         previous_vars = current_activation_vars
-        current_bounds = current_activation_bounds
 
     raise ValueError("neural network must have at least one layer")
 
@@ -271,7 +210,7 @@ def encode_instance_direction(
     second_network_name: str,
     first_network: NeuralNetwork,
     second_network: NeuralNetwork,
-    bound_overrides: BoundOverrides | None = None,
+    bounds: NetworkBounds,
 ) -> tuple[pyo.ConcreteModel, list[PyomoVar]]:
     model = pyo.ConcreteModel(
         name=f"{instance.instance_id}_{first_network_name}_minus_{second_network_name}"
@@ -289,8 +228,7 @@ def encode_instance_direction(
         input_vars,
         first_network,
         first_network_name,
-        input_bounds,
-        None if bound_overrides is None else bound_overrides.get(first_network_name),
+        bounds[first_network_name],
     )
     second_output_vars, second_output_bounds = add_network_variables(
         model,
@@ -298,8 +236,7 @@ def encode_instance_direction(
         input_vars,
         second_network,
         second_network_name,
-        input_bounds,
-        None if bound_overrides is None else bound_overrides.get(second_network_name),
+        bounds[second_network_name],
     )
     add_output_distance_constraint(
         model,

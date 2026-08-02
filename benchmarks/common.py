@@ -42,37 +42,7 @@ class Hyperrectangle(AbstractPolytope):
     def overapproximate(set_: AbstractPolytope) -> Hyperrectangle:
         if isinstance(set_, Hyperrectangle):
             return set_
-        if not isinstance(set_, HPolytope):
-            raise TypeError(f"unsupported polytope type: {type(set_).__name__}")
-
-        lower_bounds = [-float("inf")] * dim(set_)
-        upper_bounds = [float("inf")] * dim(set_)
-        for constraint in constraints_list(set_):
-            nonzero_indices = [
-                index
-                for index, coefficient in enumerate(constraint.a)
-                if coefficient != 0.0
-            ]
-            if len(nonzero_indices) != 1:
-                continue
-            index = nonzero_indices[0]
-            coefficient = constraint.a[index]
-            bound = constraint.b / coefficient
-            if coefficient > 0:
-                upper_bounds[index] = min(upper_bounds[index], bound)
-            else:
-                lower_bounds[index] = max(lower_bounds[index], bound)
-
-        for lower, upper in zip(lower_bounds, upper_bounds):
-            if lower > upper:
-                raise ValueError("input lower bound exceeds upper bound")
-            if lower == -float("inf") or upper == float("inf"):
-                raise ValueError(
-                    "HPolytope must include finite axis-aligned bounds to "
-                    "overapproximate it as a Hyperrectangle"
-                )
-        return Hyperrectangle(low=lower_bounds, high=upper_bounds)
-
+        raise TypeError(f"unsupported polytope type: {type(set_).__name__}")
 
 class HPolytope(AbstractPolytope):
     def __init__(self, constraints: list[HalfSpace]) -> None:
