@@ -11,6 +11,8 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from typing import Callable
+from typing import TextIO
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -33,6 +35,7 @@ ARTIFACT_ROOT = Path("artifacts/abcrown_instances")
 BATCH_SIZE = 512
 ConfigValue = str | int | float | bool | dict[str, "ConfigValue"]
 ConfigDict = dict[str, ConfigValue]
+ProgressCallback = Callable[[int, int, Instance, str, float], None]
 
 
 ABCROWN_COMMON_CONFIG: ConfigDict = {
@@ -253,6 +256,14 @@ def parse_args() -> argparse.Namespace:
             "Without this, each suite instance controls its own bab.timeout."
         ),
     )
+    parser.add_argument(
+        "--progress",
+        action="store_true",
+        help=(
+            "Print one status line to stderr after each instance finishes. "
+            "Stdout remains the final CSV."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -411,6 +422,7 @@ def run_abcrown(
     config_path: Path,
     instances: list[Instance],
     profile: str,
+    progress_callback: ProgressCallback | None = None,
 ) -> tuple[int, str, dict[int, tuple[str, float]]]:
     captured = io.StringIO()
     results: dict[int, tuple[str, float]] = {}
@@ -427,6 +439,7 @@ def run_abcrown(
             output_dim = suite_margin_output_dim(instances)
             work_dir = config_path.parent
             models: dict[str, SafetyMarginNetwork] = {}
+            total_instances = len(instances)
             for index, instance in enumerate(instances):
                 instance_config_path = work_dir / f"abcrown_config_instance_{index}.yaml"
                 instance_results_path = work_dir / f"abcrown_results_{index}.txt"
@@ -490,6 +503,14 @@ def run_abcrown(
                     )
                     results[index] = ("error", runtime)
                     print(traceback.format_exc(), end="")
+                    if progress_callback is not None:
+                        progress_callback(
+                            index + 1,
+                            total_instances,
+                            instance,
+                            "error",
+                            runtime,
+                        )
                     continue
 
                 runtime = float(solve_result.stats.get("elapsed") or 0.0)
@@ -499,6 +520,14 @@ def run_abcrown(
                     encoding="utf-8",
                 )
                 results[index] = (solve_result.status, runtime)
+                if progress_callback is not None:
+                    progress_callback(
+                        index + 1,
+                        total_instances,
+                        instance,
+                        solve_result.status,
+                        runtime,
+                    )
     except Exception:
         output = captured.getvalue() + traceback.format_exc()
         return 1, output, {}
@@ -540,6 +569,32 @@ def print_results(results: list[InstanceResult], abcrown_statuses: list[str]) ->
             f"{result.runtime_sec:.6f},"
             f"{result.epsilon:.17g}"
         )
+
+
+def print_progress(
+    index: int,
+    total: int,
+    instance: Instance,
+    abcrown_status: str,
+    runtime_sec: float,
+    stream: TextIO,
+) -> None:
+    result = InstanceResult(
+        instance_id=instance.instance_id,
+        suite_name=instance.suite_name,
+        status=instance_status_from_abcrown(abcrown_status),
+        runtime_sec=runtime_sec,
+        epsilon=instance.epsilon,
+        expected_status=instance.expected_status,
+    )
+    print(
+        f"[{index}/{total}] {result.instance_id}: "
+        f"status={result.status} abcrown_status={abcrown_status} "
+        f"expected={format_expected(result) or '-'} "
+        f"runtime_sec={result.runtime_sec:.3f} epsilon={result.epsilon:.17g}",
+        file=stream,
+        flush=True,
+    )
 
 
 def prepare_artifacts(
@@ -604,8 +659,29 @@ def main() -> None:
         args.timeout,
     )
     config_path, instances = prepare_artifacts(suite, args.profile)
+    progress_stream = sys.stderr
+
+    def progress_callback(
+        index: int,
+        total: int,
+        instance: Instance,
+        abcrown_status: str,
+        runtime_sec: float,
+    ) -> None:
+        print_progress(
+            index,
+            total,
+            instance,
+            abcrown_status,
+            runtime_sec,
+            progress_stream,
+        )
+
     returncode, output, abcrown_result_by_index = run_abcrown(
-        config_path, instances, args.profile
+        config_path,
+        instances,
+        args.profile,
+        progress_callback if args.progress else None,
     )
     if output:
         print(output, end="")

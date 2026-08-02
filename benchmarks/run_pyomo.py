@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import importlib
 from pathlib import Path
 import re
@@ -15,6 +16,7 @@ from pyomo.opt import TerminationCondition as TC
 from benchmarks.common import (
     Instance,
     InstanceResult,
+    InstanceStats,
     InstanceStatus,
     InstanceSuite,
     SuiteOptions,
@@ -31,6 +33,53 @@ from nn_equivalence.nn_types import Bounds, NeuralNetwork
 
 BoundTighteningMode = Literal["interval", "abcrown"]
 SolverName = Literal["highs", "gurobi", "cplex"]
+
+
+@dataclass(frozen=True)
+class PyomoInstanceStats(InstanceStats):
+    bounds_nn1_sec: float
+    bounds_nn2_sec: float
+    encode_first_sec: float
+    solver_setup_first_sec: float
+    solve_first_sec: float
+    encode_second_sec: float
+    solver_setup_second_sec: float
+    solve_second_sec: float
+
+    @property
+    def bounds_sec(self) -> float:
+        return self.bounds_nn1_sec + self.bounds_nn2_sec
+
+    @property
+    def encode_sec(self) -> float:
+        return self.encode_first_sec + self.encode_second_sec
+
+    @property
+    def solver_setup_sec(self) -> float:
+        return self.solver_setup_first_sec + self.solver_setup_second_sec
+
+    @property
+    def solve_sec(self) -> float:
+        return self.solve_first_sec + self.solve_second_sec
+
+    @property
+    def measured_total_sec(self) -> float:
+        return self.bounds_sec + self.encode_sec + self.solver_setup_sec + self.solve_sec
+
+
+@dataclass(frozen=True)
+class BoundOverrideResult:
+    overrides: encoder.BoundOverrides | None
+    nn1_runtime_sec: float
+    nn2_runtime_sec: float
+
+
+@dataclass(frozen=True)
+class DirectionResult:
+    status: InstanceStatus
+    encode_runtime_sec: float
+    solver_setup_runtime_sec: float
+    solve_runtime_sec: float
 
 
 def load_suite(name: str, suite_options: SuiteOptions) -> InstanceSuite:
@@ -260,7 +309,8 @@ def solve_instance_direction(
     solver_threads: int | None,
     highs_parallel: str | None,
     highs_mip_heuristic_effort: float | None,
-) -> tuple[InstanceStatus, float]:
+) -> DirectionResult:
+    encode_start = time.perf_counter()
     model, input_vars = encoder.encode_instance_direction(
         instance,
         first_network_name,
@@ -269,6 +319,9 @@ def solve_instance_direction(
         second_network,
         bound_overrides,
     )
+    encode_runtime_sec = time.perf_counter() - encode_start
+
+    solver_setup_start = time.perf_counter()
     solver = create_solver(
         solver_name,
         instance.timeout_sec,
@@ -284,6 +337,7 @@ def solve_instance_direction(
             f"{safe_log_name(instance.instance_id)}_{direction_name}.log"
         )
         set_solver_log_file(solver, solver_name, logfile)
+    solver_setup_runtime_sec = time.perf_counter() - solver_setup_start
 
     start_time = time.perf_counter()
     result = solver.solve(
@@ -305,7 +359,12 @@ def solve_instance_direction(
             second_network,
         )
 
-    return status, runtime_sec
+    return DirectionResult(
+        status=status,
+        encode_runtime_sec=encode_runtime_sec,
+        solver_setup_runtime_sec=solver_setup_runtime_sec,
+        solve_runtime_sec=runtime_sec,
+    )
 
 
 def combine_directional_statuses(statuses: list[InstanceStatus]) -> InstanceStatus:
@@ -330,15 +389,14 @@ def run_instance(
     highs_mip_heuristic_effort: float | None = None,
 ) -> InstanceResult:
     validate_instance(instance)
-    bounds_start = time.perf_counter()
-    bound_overrides = compute_bound_overrides(
+    bound_result = compute_bound_overrides(
         instance,
         bound_tightening,
         abcrown_bound_cache,
     )
-    bounds_runtime = time.perf_counter() - bounds_start
+    bound_overrides = bound_result.overrides
 
-    first_status, first_runtime = solve_instance_direction(
+    first_result = solve_instance_direction(
         instance,
         solver_name,
         "nn1",
@@ -352,7 +410,7 @@ def run_instance(
         highs_parallel,
         highs_mip_heuristic_effort,
     )
-    second_status, second_runtime = solve_instance_direction(
+    second_result = solve_instance_direction(
         instance,
         solver_name,
         "nn2",
@@ -366,15 +424,26 @@ def run_instance(
         highs_parallel,
         highs_mip_heuristic_effort,
     )
-    status = combine_directional_statuses([first_status, second_status])
+    status = combine_directional_statuses([first_result.status, second_result.status])
+    stats = PyomoInstanceStats(
+        bounds_nn1_sec=bound_result.nn1_runtime_sec,
+        bounds_nn2_sec=bound_result.nn2_runtime_sec,
+        encode_first_sec=first_result.encode_runtime_sec,
+        solver_setup_first_sec=first_result.solver_setup_runtime_sec,
+        solve_first_sec=first_result.solve_runtime_sec,
+        encode_second_sec=second_result.encode_runtime_sec,
+        solver_setup_second_sec=second_result.solver_setup_runtime_sec,
+        solve_second_sec=second_result.solve_runtime_sec,
+    )
 
     return InstanceResult(
         instance_id=instance.instance_id,
         suite_name=instance.suite_name,
         status=status,
-        runtime_sec=bounds_runtime + first_runtime + second_runtime,
+        runtime_sec=stats.bounds_sec + stats.solve_sec,
         epsilon=instance.epsilon,
         expected_status=instance.expected_status,
+        stats=stats,
     )
 
 
@@ -382,9 +451,13 @@ def compute_bound_overrides(
     instance: Instance,
     bound_tightening: BoundTighteningMode,
     abcrown_bound_cache: ABCrownBoundCache | None,
-) -> encoder.BoundOverrides | None:
+) -> BoundOverrideResult:
     if bound_tightening == "interval":
-        return None
+        return BoundOverrideResult(
+            overrides=None,
+            nn1_runtime_sec=0.0,
+            nn2_runtime_sec=0.0,
+        )
     if bound_tightening != "abcrown":
         raise ValueError(f"unsupported bound tightening mode: {bound_tightening}")
 
@@ -392,32 +465,56 @@ def compute_bound_overrides(
     options = ABCrownBoundOptions(timeout_sec=instance.timeout_sec)
     overrides: encoder.BoundOverrides = {}
 
+    nn1_start = time.perf_counter()
     nn1_bounds = compute_network_bounds(
         instance.nn1,
         input_bounds,
         options,
         abcrown_bound_cache,
     )
+    nn1_runtime_sec = time.perf_counter() - nn1_start
     if nn1_bounds is not None:
         overrides["nn1"] = nn1_bounds
 
+    nn2_start = time.perf_counter()
     nn2_bounds = compute_network_bounds(
         instance.nn2,
         input_bounds,
         options,
         abcrown_bound_cache,
     )
+    nn2_runtime_sec = time.perf_counter() - nn2_start
     if nn2_bounds is not None:
         overrides["nn2"] = nn2_bounds
 
-    return overrides or None
+    return BoundOverrideResult(
+        overrides=overrides or None,
+        nn1_runtime_sec=nn1_runtime_sec,
+        nn2_runtime_sec=nn2_runtime_sec,
+    )
 
 
 def print_progress(index: int, total: int, result: InstanceResult) -> None:
+    phase_text = ""
+    if isinstance(result.stats, PyomoInstanceStats):
+        phase_text = (
+            f" phases: bounds={result.stats.bounds_sec:.3f}"
+            f" bounds_nn1={result.stats.bounds_nn1_sec:.3f}"
+            f" bounds_nn2={result.stats.bounds_nn2_sec:.3f}"
+            f" encode={result.stats.encode_sec:.3f}"
+            f" encode_first={result.stats.encode_first_sec:.3f}"
+            f" encode_second={result.stats.encode_second_sec:.3f}"
+            f" solver_setup={result.stats.solver_setup_sec:.3f}"
+            f" solve={result.stats.solve_sec:.3f}"
+            f" solve_first={result.stats.solve_first_sec:.3f}"
+            f" solve_second={result.stats.solve_second_sec:.3f}"
+            f" measured_total={result.stats.measured_total_sec:.3f}"
+        )
     print(
         f"[{index}/{total}] {result.instance_id}: "
         f"status={result.status} expected={format_expected(result) or '-'} "
-        f"runtime_sec={result.runtime_sec:.3f} epsilon={result.epsilon:.17g}",
+        f"runtime_sec={result.runtime_sec:.3f} epsilon={result.epsilon:.17g}"
+        f"{phase_text}",
         file=sys.stderr,
         flush=True,
     )
