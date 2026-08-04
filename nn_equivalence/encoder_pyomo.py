@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import sys
 from typing import Any
+from typing import Literal
 
 import pyomo.environ as pyo
 from pyomo.core.base.constraint import IndexedConstraint
@@ -15,6 +17,42 @@ from benchmarks.common import contains
 WITNESS_TOLERANCE = 1e-6
 NetworkBounds = dict[str, list[Bounds]]
 PyomoVar = Any
+ReLUBinaryPhase = Literal["stable_active", "stable_inactive", "unstable"]
+
+
+@dataclass(frozen=True)
+class ReLUBinaryVariable:
+    network_name: str
+    phase: ReLUBinaryPhase
+    var: PyomoVar
+
+
+@dataclass(frozen=True)
+class ReLUBinaryStats:
+    network_name: str
+    all_binary_variables: int
+    relu_binary_variables: int
+    stable_active_relu_binary_variables: int
+    stable_inactive_relu_binary_variables: int
+    unstable_relu_binary_variables: int
+    unfixed_binary_variables: int
+
+
+@dataclass(frozen=True)
+class EncodingDebugStats:
+    direction_name: str
+    network_stats: list[ReLUBinaryStats]
+    relu_binary_variables: list[ReLUBinaryVariable]
+    output_selector_binary_variables: int
+    all_binary_variables: int
+    unfixed_binary_variables: int
+
+
+@dataclass(frozen=True)
+class EncodedDirection:
+    model: pyo.ConcreteModel
+    input_vars: list[PyomoVar]
+    debug_stats: EncodingDebugStats
 
 
 def add_constraint(constraints: IndexedConstraint, expr: Any) -> None:
@@ -23,6 +61,32 @@ def add_constraint(constraints: IndexedConstraint, expr: Any) -> None:
 
 def relu_bounds(z_bounds: Bounds) -> Bounds:
     return [(max(0.0, lower), max(0.0, upper)) for lower, upper in z_bounds]
+
+
+def relu_binary_stats(network_name: str, layer_bounds: list[Bounds]) -> ReLUBinaryStats:
+    stable_active = 0
+    stable_inactive = 0
+    unstable = 0
+
+    for z_bounds in layer_bounds[:-1]:
+        for lower, upper in z_bounds:
+            if lower >= 0.0:
+                stable_active += 1
+            elif upper <= 0.0:
+                stable_inactive += 1
+            else:
+                unstable += 1
+
+    relu_binaries = stable_active + stable_inactive + unstable
+    return ReLUBinaryStats(
+        network_name=network_name,
+        all_binary_variables=relu_binaries,
+        relu_binary_variables=relu_binaries,
+        stable_active_relu_binary_variables=stable_active,
+        stable_inactive_relu_binary_variables=stable_inactive,
+        unstable_relu_binary_variables=unstable,
+        unfixed_binary_variables=unstable,
+    )
 
 
 def affine_values(
@@ -99,22 +163,42 @@ def add_relu_bound_constraints(
     z_vars: list[PyomoVar],
     a_vars: list[PyomoVar],
     z_bounds: Bounds,
+    network_name: str,
     layer_name: str,
-) -> None:
+) -> list[ReLUBinaryVariable]:
     delta_vars = add_vars(
         model,
         f"{layer_name}_delta",
         [(0.0, 1.0)] * len(z_vars),
         domain=pyo.Binary,
     )
+    debug_variables: list[ReLUBinaryVariable] = []
 
     for index, (z_var, a_var) in enumerate(zip(z_vars, a_vars)):
         lower, upper = z_bounds[index]
+        delta_var = delta_vars[index]
+        if lower >= 0.0:
+            phase: ReLUBinaryPhase = "stable_active"
+            delta_var.fix(1.0)
+        elif upper <= 0.0:
+            phase = "stable_inactive"
+            delta_var.fix(0.0)
+        else:
+            phase = "unstable"
+        debug_variables.append(
+            ReLUBinaryVariable(
+                network_name=network_name,
+                phase=phase,
+                var=delta_var,
+            )
+        )
 
         add_constraint(constraints, a_var >= z_var)
         add_constraint(constraints, a_var >= 0)
-        add_constraint(constraints, a_var <= z_var - lower * (1 - delta_vars[index]))
-        add_constraint(constraints, a_var <= upper * delta_vars[index])
+        add_constraint(constraints, a_var <= z_var - lower * (1 - delta_var))
+        add_constraint(constraints, a_var <= upper * delta_var)
+
+    return debug_variables
 
 
 def add_network_variables(
@@ -124,11 +208,13 @@ def add_network_variables(
     nn: NeuralNetwork,
     name_prefix: str,
     bound: list[Bounds],
-) -> tuple[list[PyomoVar], Bounds]:
+) -> tuple[list[PyomoVar], Bounds, ReLUBinaryStats, list[ReLUBinaryVariable]]:
     if len(bound) != len(nn):
         raise ValueError(f"{name_prefix} bound layer count does not match network")
 
     previous_vars = input_vars
+    debug_stats = relu_binary_stats(name_prefix, bound)
+    debug_variables: list[ReLUBinaryVariable] = []
 
     for layer_index, (weights, bias) in enumerate(nn, start=1):
         z_bounds = bound[layer_index - 1]
@@ -147,7 +233,7 @@ def add_network_variables(
 
         is_output_layer = layer_index == len(nn)
         if is_output_layer:
-            return current_vars, z_bounds
+            return current_vars, z_bounds, debug_stats, debug_variables
 
         current_activation_bounds = relu_bounds(z_bounds)
         current_activation_vars = add_vars(
@@ -155,13 +241,16 @@ def add_network_variables(
             f"{name_prefix}_a{layer_index}",
             current_activation_bounds,
         )
-        add_relu_bound_constraints(
-            model,
-            constraints,
-            current_vars,
-            current_activation_vars,
-            z_bounds,
-            layer_name=f"{name_prefix}_layer_{layer_index}",
+        debug_variables.extend(
+            add_relu_bound_constraints(
+                model,
+                constraints,
+                current_vars,
+                current_activation_vars,
+                z_bounds,
+                network_name=name_prefix,
+                layer_name=f"{name_prefix}_layer_{layer_index}",
+            )
         )
         previous_vars = current_activation_vars
 
@@ -177,7 +266,7 @@ def add_output_distance_constraint(
     second_output_bounds: Bounds,
     epsilon: float,
     name_prefix: str,
-) -> None:
+) -> int:
     if len(first_output_vars) != len(second_output_vars):
         raise ValueError("output variable lists must have the same length")
     if not first_output_vars:
@@ -202,6 +291,7 @@ def add_output_distance_constraint(
         )
 
     add_constraint(constraints, sum(selectors) >= 1)
+    return len(selectors)
 
 
 def encode_instance_direction(
@@ -211,7 +301,7 @@ def encode_instance_direction(
     first_network: NeuralNetwork,
     second_network: NeuralNetwork,
     bounds: NetworkBounds,
-) -> tuple[pyo.ConcreteModel, list[PyomoVar]]:
+) -> EncodedDirection:
     model = pyo.ConcreteModel(
         name=f"{instance.instance_id}_{first_network_name}_minus_{second_network_name}"
     )
@@ -222,7 +312,12 @@ def encode_instance_direction(
     input_bounds = input_box.bounds()
     input_vars = add_vars(model, "x", input_bounds)
     add_input_region_constraints(constraints, input_vars, instance)
-    first_output_vars, first_output_bounds = add_network_variables(
+    (
+        first_output_vars,
+        first_output_bounds,
+        first_debug_stats,
+        first_debug_variables,
+    ) = add_network_variables(
         model,
         constraints,
         input_vars,
@@ -230,7 +325,12 @@ def encode_instance_direction(
         first_network_name,
         bounds[first_network_name],
     )
-    second_output_vars, second_output_bounds = add_network_variables(
+    (
+        second_output_vars,
+        second_output_bounds,
+        second_debug_stats,
+        second_debug_variables,
+    ) = add_network_variables(
         model,
         constraints,
         input_vars,
@@ -238,7 +338,7 @@ def encode_instance_direction(
         second_network_name,
         bounds[second_network_name],
     )
-    add_output_distance_constraint(
+    selector_binary_count = add_output_distance_constraint(
         model,
         constraints,
         first_output_vars,
@@ -250,7 +350,29 @@ def encode_instance_direction(
     )
     model.objective = pyo.Objective(expr=0.0, sense=pyo.minimize)
 
-    return model, input_vars
+    all_binary_variables = (
+        first_debug_stats.all_binary_variables
+        + second_debug_stats.all_binary_variables
+        + selector_binary_count
+    )
+    unfixed_binary_variables = (
+        first_debug_stats.unfixed_binary_variables
+        + second_debug_stats.unfixed_binary_variables
+        + selector_binary_count
+    )
+    direction_name = f"{first_network_name}_minus_{second_network_name}"
+    return EncodedDirection(
+        model=model,
+        input_vars=input_vars,
+        debug_stats=EncodingDebugStats(
+            direction_name=direction_name,
+            network_stats=[first_debug_stats, second_debug_stats],
+            relu_binary_variables=first_debug_variables + second_debug_variables,
+            output_selector_binary_variables=selector_binary_count,
+            all_binary_variables=all_binary_variables,
+            unfixed_binary_variables=unfixed_binary_variables,
+        ),
+    )
 
 
 def validate_directional_witness(

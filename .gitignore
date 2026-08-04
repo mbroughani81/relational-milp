@@ -5,6 +5,7 @@ artifacts/
 zip_git_visible.py
 *.zip
 *.txt
+*.json
 
 # Python bytecode and caches
 __pycache__/

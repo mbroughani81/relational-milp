@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import importlib
+import json
 from pathlib import Path
 import time
 from typing import Any
@@ -10,6 +11,7 @@ from typing import Literal
 
 import pyomo.environ as pyo
 from pyomo.opt import TerminationCondition as TC
+from pyomo.repn import generate_standard_repn
 
 from benchmarks.abcrown_bounds import (
     ABCrownBoundCache,
@@ -47,6 +49,24 @@ class DirectionResult:
     stats: SolveStats
 
 
+@dataclass(frozen=True)
+class ModelBinaryStats:
+    rows: int | str
+    cols: int | str
+    nonzeros: int | str
+    all_binary_variables: int | str
+    unfixed_binary_variables: int | str
+
+
+@dataclass(frozen=True)
+class CplexDebugStats:
+    loaded_model_stats: ModelBinaryStats | None
+    after_presolve_stats: ModelBinaryStats | None
+    after_presolve_network_stats: list[encoder.ReLUBinaryStats]
+    progress_details: list[tuple[str, str | int | float]]
+    presolve_runtime_sec: float
+
+
 def load_suite(name: str, suite_options: SuiteOptions) -> InstanceSuite:
     module = importlib.import_module(f"benchmarks.{name}")
     return module.load_suite(suite_options)
@@ -81,6 +101,59 @@ def write_results_csv(path: Path, results: list[InstanceResult]) -> None:
     path.write_text(results_csv(results), encoding="utf-8")
 
 
+def write_debug_json(path: Path, debug_payloads: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(debug_payloads, indent=2) + "\n", encoding="utf-8")
+
+
+def filter_instances(
+    instances: list[Instance],
+    limit: int | None,
+    ids: list[str],
+) -> list[Instance]:
+    if limit is not None:
+        if limit < 1:
+            raise ValueError("suite option 'limit' must be at least 1")
+        return instances[:limit]
+    if not ids:
+        raise ValueError("either suite option 'limit' or 'ids' must be provided")
+
+    selected_ids = set(ids)
+    selected_instances = [
+        instance for instance in instances if instance.instance_id in selected_ids
+    ]
+    missing_ids = selected_ids - {
+        instance.instance_id for instance in selected_instances
+    }
+    if missing_ids:
+        raise ValueError(f"unknown instance ids: {sorted(missing_ids)}")
+    return selected_instances
+
+
+def parse_instance_ids(raw_ids: list[str]) -> list[str]:
+    return [
+        instance_id.strip()
+        for raw_id in raw_ids
+        for instance_id in raw_id.split(",")
+        if instance_id.strip()
+    ]
+
+
+def extract_selection_from_suite_options(
+    suite_options: SuiteOptions,
+) -> tuple[SuiteOptions, int | None, list[str]]:
+    options = dict(suite_options)
+    suite_limit = options.pop("limit", None)
+    suite_ids = options.pop("ids", None)
+    if suite_limit is not None and suite_ids is not None:
+        raise ValueError("suite options 'limit' and 'ids' cannot be combined")
+    if suite_limit is not None:
+        return options, int(suite_limit), []
+    if suite_ids is not None:
+        return options, None, parse_instance_ids([suite_ids])
+    return options, None, []
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run an NN equivalence instance suite with Pyomo."
@@ -105,6 +178,20 @@ def parse_args() -> argparse.Namespace:
         "--verbose",
         action="store_true",
         help="Print backend solver logs to stdout.",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "Print CPLEX-only structured model-size, ReLU-binary, presolve, "
+            "and solver-progress details."
+        ),
+    )
+    parser.add_argument(
+        "--debug-out",
+        type=Path,
+        default=None,
+        help="Also write CPLEX debug JSON to this file.",
     )
     parser.add_argument(
         "--bound-tightening",
@@ -160,6 +247,226 @@ def create_solver(
     return solver
 
 
+def count_pyomo_nonzeros(model: pyo.ConcreteModel) -> int | str:
+    nonzeros = 0
+    for constraint in model.component_data_objects(
+        pyo.Constraint,
+        active=True,
+        descend_into=True,
+    ):
+        representation = generate_standard_repn(constraint.body)
+        if not representation.is_linear():
+            return "nonlinear"
+        nonzeros += len(representation.linear_vars)
+    return nonzeros
+
+
+def pyomo_model_stats(model: pyo.ConcreteModel) -> ModelBinaryStats:
+    variables = list(
+        model.component_data_objects(pyo.Var, active=True, descend_into=True)
+    )
+    binary_variables = [variable for variable in variables if variable.is_binary()]
+    rows = sum(
+        1
+        for _ in model.component_data_objects(
+            pyo.Constraint,
+            active=True,
+            descend_into=True,
+        )
+    )
+    return ModelBinaryStats(
+        rows=rows,
+        cols=len(variables),
+        nonzeros=count_pyomo_nonzeros(model),
+        all_binary_variables=len(binary_variables),
+        unfixed_binary_variables=sum(
+            1 for variable in binary_variables if not variable.fixed
+        ),
+    )
+
+
+def cplex_loaded_model_stats(solver: Any) -> ModelBinaryStats | None:
+    solver_model = getattr(solver, "_solver_model", None)
+    if solver_model is None or not hasattr(solver_model, "variables"):
+        return None
+
+    variable_types = list(solver_model.variables.get_types())
+    lower_bounds = list(solver_model.variables.get_lower_bounds())
+    upper_bounds = list(solver_model.variables.get_upper_bounds())
+    binary_count = 0
+    unfixed_binary_count = 0
+    for variable_type, lower_bound, upper_bound in zip(
+        variable_types,
+        lower_bounds,
+        upper_bounds,
+    ):
+        if variable_type == solver_model.variables.type.binary:
+            binary_count += 1
+            if lower_bound != upper_bound:
+                unfixed_binary_count += 1
+
+    return ModelBinaryStats(
+        rows=solver_model.linear_constraints.get_num(),
+        cols=solver_model.variables.get_num(),
+        nonzeros=solver_model.linear_constraints.get_num_nonzeros(),
+        all_binary_variables=binary_count,
+        unfixed_binary_variables=unfixed_binary_count,
+    )
+
+
+def empty_relu_binary_stats(network_name: str) -> encoder.ReLUBinaryStats:
+    return encoder.ReLUBinaryStats(
+        network_name=network_name,
+        all_binary_variables=0,
+        relu_binary_variables=0,
+        stable_active_relu_binary_variables=0,
+        stable_inactive_relu_binary_variables=0,
+        unstable_relu_binary_variables=0,
+        unfixed_binary_variables=0,
+    )
+
+
+def increment_relu_binary_stats(
+    stats_by_network: dict[str, encoder.ReLUBinaryStats],
+    network_name: str,
+    phase: encoder.ReLUBinaryPhase,
+    unfixed: bool,
+) -> None:
+    current = stats_by_network[network_name]
+    stats_by_network[network_name] = encoder.ReLUBinaryStats(
+        network_name=network_name,
+        all_binary_variables=current.all_binary_variables + 1,
+        relu_binary_variables=current.relu_binary_variables + 1,
+        stable_active_relu_binary_variables=(
+            current.stable_active_relu_binary_variables
+            + (1 if phase == "stable_active" else 0)
+        ),
+        stable_inactive_relu_binary_variables=(
+            current.stable_inactive_relu_binary_variables
+            + (1 if phase == "stable_inactive" else 0)
+        ),
+        unstable_relu_binary_variables=(
+            current.unstable_relu_binary_variables
+            + (1 if phase == "unstable" else 0)
+        ),
+        unfixed_binary_variables=(
+            current.unfixed_binary_variables + (1 if unfixed else 0)
+        ),
+    )
+
+
+def cplex_after_presolve_stats(
+    solver: Any,
+    encoding_stats: encoder.EncodingDebugStats,
+) -> tuple[ModelBinaryStats | None, list[encoder.ReLUBinaryStats]]:
+    solver_model = getattr(solver, "_solver_model", None)
+    if solver_model is None or not hasattr(solver_model, "presolve"):
+        return None, []
+
+    solver_model.presolve.presolve(solver_model.presolve.method.primal)
+    presolved_col_status = solver_model.presolve.get_presolved_col_status()
+    presolved_row_status = solver_model.presolve.get_presolved_row_status()
+    variable_names = list(solver_model.variables.get_names())
+    variable_types = list(solver_model.variables.get_types())
+    lower_bounds = list(solver_model.variables.get_lower_bounds())
+    upper_bounds = list(solver_model.variables.get_upper_bounds())
+    solver_to_pyomo = getattr(solver, "_solver_var_to_pyomo_var_map", {})
+    relu_variables = {
+        id(relu_variable.var): relu_variable
+        for relu_variable in encoding_stats.relu_binary_variables
+    }
+    stats_by_network = {
+        network_stats.network_name: empty_relu_binary_stats(
+            network_stats.network_name
+        )
+        for network_stats in encoding_stats.network_stats
+    }
+
+    binary_count = 0
+    unfixed_binary_count = 0
+    for original_index in presolved_col_status:
+        if original_index < 0:
+            continue
+
+        is_binary = (
+            variable_types[original_index] == solver_model.variables.type.binary
+        )
+        unfixed = lower_bounds[original_index] != upper_bounds[original_index]
+        if is_binary:
+            binary_count += 1
+            if unfixed:
+                unfixed_binary_count += 1
+
+        variable_name = variable_names[original_index]
+        pyomo_var = solver_to_pyomo.get(variable_name)
+        relu_variable = relu_variables.get(id(pyomo_var))
+        if relu_variable is not None:
+            increment_relu_binary_stats(
+                stats_by_network,
+                relu_variable.network_name,
+                relu_variable.phase,
+                unfixed,
+            )
+
+    stats = ModelBinaryStats(
+        rows=len(presolved_row_status),
+        cols=len(presolved_col_status),
+        nonzeros="unavailable",
+        all_binary_variables=binary_count,
+        unfixed_binary_variables=unfixed_binary_count,
+    )
+    return stats, list(stats_by_network.values())
+
+
+def cplex_progress_details(solver: Any) -> list[tuple[str, str | int | float]]:
+    solver_model = getattr(solver, "_solver_model", None)
+    if solver_model is None or not hasattr(solver_model, "solution"):
+        return []
+
+    details: list[tuple[str, str | int | float]] = []
+    progress = solver_model.solution.progress
+    for output_name, method_name in (
+        ("nodes_processed", "get_num_nodes_processed"),
+        ("nodes_remaining", "get_num_nodes_remaining"),
+        ("iterations", "get_num_iterations"),
+    ):
+        if hasattr(progress, method_name):
+            details.append((output_name, getattr(progress, method_name)()))
+    mip_solution = solver_model.solution.MIP
+    if (
+        hasattr(mip_solution, "get_mip_relative_gap")
+        and solver_model.solution.is_primal_feasible()
+    ):
+        try:
+            details.append(("mip_relative_gap", mip_solution.get_mip_relative_gap()))
+        except Exception:
+            details.append(("mip_relative_gap", "unavailable"))
+    return details
+
+
+def cplex_debug_stats(
+    solver: Any,
+    encoding_stats: encoder.EncodingDebugStats,
+) -> CplexDebugStats:
+    loaded_model_stats = cplex_loaded_model_stats(solver)
+
+    presolve_start = time.perf_counter()
+    after_presolve_stats, after_presolve_network_stats = cplex_after_presolve_stats(
+        solver,
+        encoding_stats,
+    )
+    presolve_runtime_sec = time.perf_counter() - presolve_start
+    progress_details = cplex_progress_details(solver)
+
+    return CplexDebugStats(
+        loaded_model_stats=loaded_model_stats,
+        after_presolve_stats=after_presolve_stats,
+        after_presolve_network_stats=after_presolve_network_stats,
+        progress_details=progress_details,
+        presolve_runtime_sec=presolve_runtime_sec,
+    )
+
+
 def status_from_pyomo(termination_condition: TC) -> InstanceStatus:
     if termination_condition in {TC.optimal, TC.feasible, TC.globallyOptimal}:
         return "sat"
@@ -170,6 +477,126 @@ def status_from_pyomo(termination_condition: TC) -> InstanceStatus:
     return "unknown"
 
 
+def model_stats_details(
+    phase: str,
+    stats: ModelBinaryStats,
+) -> list[tuple[str, str | int | float]]:
+    return [
+        (f"{phase}_rows", stats.rows),
+        (f"{phase}_cols", stats.cols),
+        (f"{phase}_nonzeros", stats.nonzeros),
+        (f"{phase}_all_binary_variables", stats.all_binary_variables),
+        (f"{phase}_unfixed_binary_variables", stats.unfixed_binary_variables),
+    ]
+
+
+def format_value(value: str | int | float) -> str:
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    return str(value)
+
+
+def format_detail_pairs(details: list[tuple[str, str | int | float]]) -> str:
+    return " ".join(f"{name}={format_value(value)}" for name, value in details)
+
+
+def direction_debug_details(
+    encoding_stats: encoder.EncodingDebugStats,
+    before_presolve_stats: ModelBinaryStats,
+    cplex_stats: CplexDebugStats,
+) -> list[tuple[str, str | int | float]]:
+    details: list[tuple[str, str | int | float]] = [
+        ("direction", encoding_stats.direction_name),
+        (
+            "output_selector_binary_variables",
+            encoding_stats.output_selector_binary_variables,
+        ),
+        ("all_binary_variables", encoding_stats.all_binary_variables),
+        ("unfixed_binary_variables", encoding_stats.unfixed_binary_variables),
+    ]
+    for network_stats in encoding_stats.network_stats:
+        prefix = f"before_presolve_{network_stats.network_name}"
+        details.extend(
+            [
+                (
+                    f"{prefix}_all_binary_variables",
+                    network_stats.all_binary_variables,
+                ),
+                (
+                    f"{prefix}_relu_binary_variables",
+                    network_stats.relu_binary_variables,
+                ),
+                (
+                    f"{prefix}_stable_active_relu_binary_variables",
+                    network_stats.stable_active_relu_binary_variables,
+                ),
+                (
+                    f"{prefix}_stable_inactive_relu_binary_variables",
+                    network_stats.stable_inactive_relu_binary_variables,
+                ),
+                (
+                    f"{prefix}_unstable_relu_binary_variables",
+                    network_stats.unstable_relu_binary_variables,
+                ),
+                (
+                    f"{prefix}_unfixed_binary_variables",
+                    network_stats.unfixed_binary_variables,
+                ),
+            ]
+        )
+    details.extend(model_stats_details("before_presolve", before_presolve_stats))
+    if cplex_stats.loaded_model_stats is None:
+        details.append(("cplex_loaded_model_stats", "unavailable"))
+    else:
+        details.extend(
+            model_stats_details(
+                "cplex_loaded_model",
+                cplex_stats.loaded_model_stats,
+            )
+        )
+    if cplex_stats.after_presolve_stats is None:
+        details.append(("after_presolve_stats", "unavailable"))
+    else:
+        details.extend(
+            model_stats_details(
+                "after_presolve",
+                cplex_stats.after_presolve_stats,
+            )
+        )
+    for network_stats in cplex_stats.after_presolve_network_stats:
+        prefix = f"after_presolve_{network_stats.network_name}"
+        details.extend(
+            [
+                (
+                    f"{prefix}_all_binary_variables",
+                    network_stats.all_binary_variables,
+                ),
+                (
+                    f"{prefix}_relu_binary_variables",
+                    network_stats.relu_binary_variables,
+                ),
+                (
+                    f"{prefix}_stable_active_relu_binary_variables",
+                    network_stats.stable_active_relu_binary_variables,
+                ),
+                (
+                    f"{prefix}_stable_inactive_relu_binary_variables",
+                    network_stats.stable_inactive_relu_binary_variables,
+                ),
+                (
+                    f"{prefix}_unstable_relu_binary_variables",
+                    network_stats.unstable_relu_binary_variables,
+                ),
+                (
+                    f"{prefix}_unfixed_binary_variables",
+                    network_stats.unfixed_binary_variables,
+                ),
+            ]
+        )
+    details.extend(cplex_stats.progress_details)
+    return details
+
+
 def solve_instance_direction(
     instance: Instance,
     solver_name: SolverName,
@@ -178,10 +605,11 @@ def solve_instance_direction(
     first_network: NeuralNetwork,
     second_network: NeuralNetwork,
     verbose: bool,
+    debug: bool,
     bounds: encoder.NetworkBounds,
 ) -> DirectionResult:
     encode_start = time.perf_counter()
-    model, input_vars = encoder.encode_instance_direction(
+    encoded = encoder.encode_instance_direction(
         instance,
         first_network_name,
         second_network_name,
@@ -190,6 +618,11 @@ def solve_instance_direction(
         bounds,
     )
     encode_runtime_sec = time.perf_counter() - encode_start
+    model = encoded.model
+    input_vars = encoded.input_vars
+    before_presolve_stats = None
+    if debug:
+        before_presolve_stats = pyomo_model_stats(model)
 
     solver_setup_start = time.perf_counter()
     solver = create_solver(
@@ -219,15 +652,34 @@ def solve_instance_direction(
         )
 
     direction_name = f"{first_network_name}_minus_{second_network_name}"
+    details: list[tuple[str, str | int | float]] = []
+    debug_timings: list[tuple[str, float]] = []
+    if debug:
+        if solver_name != "cplex":
+            raise RuntimeError("--debug is currently supported only with --solver cplex")
+        if before_presolve_stats is None:
+            raise ValueError("debug enabled without before-presolve stats")
+        cplex_stats = cplex_debug_stats(solver, encoded.debug_stats)
+        details = direction_debug_details(
+            encoded.debug_stats,
+            before_presolve_stats,
+            cplex_stats,
+        )
+        debug_timings = [
+            ("presolve", cplex_stats.presolve_runtime_sec),
+        ]
+    timings = [
+        ("encode", encode_runtime_sec),
+        ("solver_setup", solver_setup_runtime_sec),
+        ("solve", runtime_sec),
+    ]
+    timings.extend(debug_timings)
     return DirectionResult(
         status=status,
         stats=SolveStats(
             name=direction_name,
-            timings=[
-                ("encode", encode_runtime_sec),
-                ("solver_setup", solver_setup_runtime_sec),
-                ("solve", runtime_sec),
-            ],
+            timings=timings,
+            details=details,
         ),
     )
 
@@ -248,7 +700,10 @@ def run_instance(
     bound_tightening: BoundTighteningMode,
     abcrown_bound_cache: ABCrownBoundCache | None,
     verbose: bool = False,
+    debug: bool = False,
 ) -> InstanceResult:
+    if debug and solver_name != "cplex":
+        raise RuntimeError("--debug is currently supported only with --solver cplex")
     validate_instance(instance)
     bound_result = compute_bounds(
         instance,
@@ -265,6 +720,7 @@ def run_instance(
         instance.nn1,
         instance.nn2,
         verbose,
+        debug,
         bounds,
     )
     second_result = solve_instance_direction(
@@ -275,6 +731,7 @@ def run_instance(
         instance.nn2,
         instance.nn1,
         verbose,
+        debug,
         bounds,
     )
     status = combine_directional_statuses([first_result.status, second_result.status])
@@ -472,7 +929,179 @@ def format_solve_stats(stats: list[SolveStats]) -> str:
     return " ".join(parts)
 
 
-def print_progress(index: int, total: int, result: InstanceResult) -> None:
+def detail_value(
+    details: dict[str, str | int | float],
+    key: str,
+) -> str | int | float | None:
+    return details.get(key)
+
+
+def model_stats_json(
+    details: dict[str, str | int | float],
+    prefix: str,
+) -> dict[str, str | int | float | None]:
+    return {
+        "rows": detail_value(details, f"{prefix}_rows"),
+        "cols": detail_value(details, f"{prefix}_cols"),
+        "nonzeros": detail_value(details, f"{prefix}_nonzeros"),
+        "all_binary_variables": detail_value(
+            details,
+            f"{prefix}_all_binary_variables",
+        ),
+        "unfixed_binary_variables": detail_value(
+            details,
+            f"{prefix}_unfixed_binary_variables",
+        ),
+    }
+
+
+def network_relu_stats_json(
+    details: dict[str, str | int | float],
+    prefix: str,
+    network_name: str,
+) -> dict[str, str | int | float | None]:
+    full_prefix = f"{prefix}_{network_name}"
+    return {
+        "all_binary_variables": detail_value(
+            details,
+            f"{full_prefix}_all_binary_variables",
+        ),
+        "relu_binary_variables": detail_value(
+            details,
+            f"{full_prefix}_relu_binary_variables",
+        ),
+        "stable_active_relu_binary_variables": detail_value(
+            details,
+            f"{full_prefix}_stable_active_relu_binary_variables",
+        ),
+        "stable_inactive_relu_binary_variables": detail_value(
+            details,
+            f"{full_prefix}_stable_inactive_relu_binary_variables",
+        ),
+        "unstable_relu_binary_variables": detail_value(
+            details,
+            f"{full_prefix}_unstable_relu_binary_variables",
+        ),
+        "unfixed_binary_variables": detail_value(
+            details,
+            f"{full_prefix}_unfixed_binary_variables",
+        ),
+    }
+
+
+def solve_stats_debug_json(solve_stats: SolveStats) -> dict[str, Any]:
+    details = dict(solve_stats.details)
+    return {
+        "direction": details.get("direction", solve_stats.name),
+        "timings_sec": {
+            phase: runtime_sec for phase, runtime_sec in solve_stats.timings
+        },
+        "binary_variables": {
+            "total": {
+                "all_binary_variables": detail_value(
+                    details,
+                    "all_binary_variables",
+                ),
+                "unfixed_binary_variables": detail_value(
+                    details,
+                    "unfixed_binary_variables",
+                ),
+                "output_selector_binary_variables": detail_value(
+                    details,
+                    "output_selector_binary_variables",
+                ),
+            },
+            "before_presolve": {
+                "model": model_stats_json(details, "before_presolve"),
+                "networks": {
+                    "nn1": network_relu_stats_json(
+                        details,
+                        "before_presolve",
+                        "nn1",
+                    ),
+                    "nn2": network_relu_stats_json(
+                        details,
+                        "before_presolve",
+                        "nn2",
+                    ),
+                },
+            },
+            "cplex_loaded_model": model_stats_json(
+                details,
+                "cplex_loaded_model",
+            ),
+            "after_presolve": {
+                "model": model_stats_json(details, "after_presolve"),
+                "networks": {
+                    "nn1": network_relu_stats_json(
+                        details,
+                        "after_presolve",
+                        "nn1",
+                    ),
+                    "nn2": network_relu_stats_json(
+                        details,
+                        "after_presolve",
+                        "nn2",
+                    ),
+                },
+            },
+        },
+        "cplex_progress": {
+            name: value
+            for name, value in details.items()
+            if name
+            in {
+                "nodes_processed",
+                "nodes_remaining",
+                "iterations",
+                "mip_relative_gap",
+            }
+        },
+    }
+
+
+def phase_timings_json(stats: list[SolveStats]) -> dict[str, Any]:
+    return {
+        "phases": {
+            solve_stats.name: {
+                phase: runtime_sec for phase, runtime_sec in solve_stats.timings
+            }
+            for solve_stats in stats
+        },
+        "measured_total_sec": sum(
+            solve_stats.measured_total_sec for solve_stats in stats
+        ),
+    }
+
+
+def instance_debug_json(result: InstanceResult) -> dict[str, Any]:
+    directions: dict[str, dict[str, Any]] = {}
+    for solve_stats in result.stats:
+        if not solve_stats.details:
+            continue
+        direction_payload = solve_stats_debug_json(solve_stats)
+        direction = str(direction_payload["direction"])
+        directions[direction] = direction_payload
+
+    return {
+        "type": "pyomo_cplex_instance_debug",
+        "instance_id": result.instance_id,
+        "suite_name": result.suite_name,
+        "status": result.status,
+        "expected": format_expected(result),
+        "runtime_sec": result.runtime_sec,
+        "epsilon": result.epsilon,
+        "phase_timings_sec": phase_timings_json(result.stats),
+        "directions": directions,
+    }
+
+
+def print_progress(
+    index: int,
+    total: int,
+    result: InstanceResult,
+    debug_payload: dict[str, Any] | None,
+) -> None:
     phase_text = ""
     if result.stats:
         phase_text = f" phases: {format_solve_stats(result.stats)}"
@@ -483,34 +1112,57 @@ def print_progress(index: int, total: int, result: InstanceResult) -> None:
         f"{phase_text}",
         flush=True,
     )
+    if debug_payload is not None:
+        print(json.dumps(debug_payload, indent=2), flush=True)
 
 
 def main() -> None:
     args = parse_args()
     try:
-        suite = load_suite(args.suite, parse_suite_options(args.suite_options))
+        debug_enabled = args.debug or args.debug_out is not None
+        suite_options, limit, ids = extract_selection_from_suite_options(
+            parse_suite_options(args.suite_options),
+        )
+        suite = load_suite(args.suite, suite_options)
+        instances = filter_instances(
+            suite.instances,
+            limit,
+            ids,
+        )
         abcrown_bound_cache = (
             ABCrownBoundCache() if args.bound_tightening == "abcrown" else None
         )
         results: list[InstanceResult] = []
-        total_instances = len(suite.instances)
-        for index, instance in enumerate(suite.instances, start=1):
+        debug_payloads: list[dict[str, Any]] = []
+        total_instances = len(instances)
+        for index, instance in enumerate(instances, start=1):
             result = run_instance(
                 instance,
                 args.solver,
                 args.bound_tightening,
                 abcrown_bound_cache,
                 args.verbose,
+                debug_enabled,
             )
             results.append(result)
-            print_progress(index, total_instances, result)
-    except RuntimeError as error:
+            debug_payload = instance_debug_json(result) if debug_enabled else None
+            if args.debug_out is not None and debug_payload is not None:
+                debug_payloads.append(debug_payload)
+            print_progress(
+                index,
+                total_instances,
+                result,
+                debug_payload if args.debug else None,
+            )
+    except (RuntimeError, ValueError) as error:
         print(error)
         raise SystemExit(2) from error
 
     print_results(results)
     if args.csv is not None:
         write_results_csv(args.csv, results)
+    if args.debug_out is not None:
+        write_debug_json(args.debug_out, debug_payloads)
 
 
 if __name__ == "__main__":

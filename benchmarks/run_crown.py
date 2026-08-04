@@ -598,6 +598,54 @@ def write_results_csv(
     path.write_text(results_csv(results, abcrown_statuses), encoding="utf-8")
 
 
+def filter_instances(
+    instances: list[Instance],
+    limit: int | None,
+    ids: list[str],
+) -> list[Instance]:
+    if limit is not None:
+        if limit < 1:
+            raise ValueError("suite option 'limit' must be at least 1")
+        return instances[:limit]
+    if not ids:
+        raise ValueError("either suite option 'limit' or 'ids' must be provided")
+
+    selected_ids = set(ids)
+    selected_instances = [
+        instance for instance in instances if instance.instance_id in selected_ids
+    ]
+    missing_ids = selected_ids - {
+        instance.instance_id for instance in selected_instances
+    }
+    if missing_ids:
+        raise ValueError(f"unknown instance ids: {sorted(missing_ids)}")
+    return selected_instances
+
+
+def parse_instance_ids(raw_ids: list[str]) -> list[str]:
+    return [
+        instance_id.strip()
+        for raw_id in raw_ids
+        for instance_id in raw_id.split(",")
+        if instance_id.strip()
+    ]
+
+
+def extract_selection_from_suite_options(
+    suite_options: SuiteOptions,
+) -> tuple[SuiteOptions, int | None, list[str]]:
+    options = dict(suite_options)
+    suite_limit = options.pop("limit", None)
+    suite_ids = options.pop("ids", None)
+    if suite_limit is not None and suite_ids is not None:
+        raise ValueError("suite options 'limit' and 'ids' cannot be combined")
+    if suite_limit is not None:
+        return options, int(suite_limit), []
+    if suite_ids is not None:
+        return options, None, parse_instance_ids([suite_ids])
+    return options, None, []
+
+
 def print_progress(
     index: int,
     total: int,
@@ -681,43 +729,58 @@ def main() -> None:
             print(profile)
         return
 
-    suite = apply_timeout_override(
-        load_suite(args.suite, parse_suite_options(args.suite_options)),
-        args.timeout,
-    )
-    config_path, instances = prepare_artifacts(suite, args.profile)
-    progress_stream = sys.stdout
-
-    def progress_callback(
-        index: int,
-        total: int,
-        instance: Instance,
-        abcrown_status: str,
-        runtime_sec: float,
-    ) -> None:
-        print_progress(
-            index,
-            total,
-            instance,
-            abcrown_status,
-            runtime_sec,
-            progress_stream,
+    try:
+        suite_options, limit, ids = extract_selection_from_suite_options(
+            parse_suite_options(args.suite_options),
         )
+        suite = apply_timeout_override(
+            load_suite(args.suite, suite_options),
+            args.timeout,
+        )
+        instances = filter_instances(
+            suite.instances,
+            limit,
+            ids,
+        )
+        config_path, instances = prepare_artifacts(
+            InstanceSuite(name=suite.name, instances=instances),
+            args.profile,
+        )
+        progress_stream = sys.stdout
 
-    returncode, output, abcrown_result_by_index = run_abcrown(
-        config_path,
-        instances,
-        args.profile,
-        progress_callback,
-    )
-    if output and (args.verbose or returncode != 0):
-        print(output, end="")
+        def progress_callback(
+            index: int,
+            total: int,
+            instance: Instance,
+            abcrown_status: str,
+            runtime_sec: float,
+        ) -> None:
+            print_progress(
+                index,
+                total,
+                instance,
+                abcrown_status,
+                runtime_sec,
+                progress_stream,
+            )
 
-    results, abcrown_statuses = build_results(instances, abcrown_result_by_index)
-    print_results(results, abcrown_statuses)
-    if args.csv is not None:
-        write_results_csv(args.csv, results, abcrown_statuses)
-    raise SystemExit(returncode)
+        returncode, output, abcrown_result_by_index = run_abcrown(
+            config_path,
+            instances,
+            args.profile,
+            progress_callback,
+        )
+        if output and (args.verbose or returncode != 0):
+            print(output, end="")
+
+        results, abcrown_statuses = build_results(instances, abcrown_result_by_index)
+        print_results(results, abcrown_statuses)
+        if args.csv is not None:
+            write_results_csv(args.csv, results, abcrown_statuses)
+        raise SystemExit(returncode)
+    except (RuntimeError, ValueError) as error:
+        print(error)
+        raise SystemExit(2) from error
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import math
 from typing import Literal
 
 from nn_equivalence.nn_types import Bounds, NeuralNetwork
@@ -128,6 +129,7 @@ class InstanceSuite:
 class SolveStats:
     name: str
     timings: list[tuple[str, float]] = field(default_factory=list)
+    details: list[tuple[str, str | int | float]] = field(default_factory=list)
 
     @property
     def measured_total_sec(self) -> float:
