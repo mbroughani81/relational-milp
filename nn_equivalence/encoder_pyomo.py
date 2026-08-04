@@ -63,7 +63,11 @@ def relu_bounds(z_bounds: Bounds) -> Bounds:
     return [(max(0.0, lower), max(0.0, upper)) for lower, upper in z_bounds]
 
 
-def relu_binary_stats(network_name: str, layer_bounds: list[Bounds]) -> ReLUBinaryStats:
+def relu_binary_stats(
+    network_name: str,
+    layer_bounds: list[Bounds],
+    fix_stable_relu_binaries: bool,
+) -> ReLUBinaryStats:
     stable_active = 0
     stable_inactive = 0
     unstable = 0
@@ -85,7 +89,9 @@ def relu_binary_stats(network_name: str, layer_bounds: list[Bounds]) -> ReLUBina
         stable_active_relu_binary_variables=stable_active,
         stable_inactive_relu_binary_variables=stable_inactive,
         unstable_relu_binary_variables=unstable,
-        unfixed_binary_variables=unstable,
+        unfixed_binary_variables=(
+            unstable if fix_stable_relu_binaries else relu_binaries
+        ),
     )
 
 
@@ -165,6 +171,7 @@ def add_relu_bound_constraints(
     z_bounds: Bounds,
     network_name: str,
     layer_name: str,
+    fix_stable_relu_binaries: bool,
 ) -> list[ReLUBinaryVariable]:
     delta_vars = add_vars(
         model,
@@ -179,10 +186,12 @@ def add_relu_bound_constraints(
         delta_var = delta_vars[index]
         if lower >= 0.0:
             phase: ReLUBinaryPhase = "stable_active"
-            delta_var.fix(1.0)
+            if fix_stable_relu_binaries:
+                delta_var.fix(1.0)
         elif upper <= 0.0:
             phase = "stable_inactive"
-            delta_var.fix(0.0)
+            if fix_stable_relu_binaries:
+                delta_var.fix(0.0)
         else:
             phase = "unstable"
         debug_variables.append(
@@ -208,12 +217,17 @@ def add_network_variables(
     nn: NeuralNetwork,
     name_prefix: str,
     bound: list[Bounds],
+    fix_stable_relu_binaries: bool,
 ) -> tuple[list[PyomoVar], Bounds, ReLUBinaryStats, list[ReLUBinaryVariable]]:
     if len(bound) != len(nn):
         raise ValueError(f"{name_prefix} bound layer count does not match network")
 
     previous_vars = input_vars
-    debug_stats = relu_binary_stats(name_prefix, bound)
+    debug_stats = relu_binary_stats(
+        name_prefix,
+        bound,
+        fix_stable_relu_binaries,
+    )
     debug_variables: list[ReLUBinaryVariable] = []
 
     for layer_index, (weights, bias) in enumerate(nn, start=1):
@@ -250,6 +264,7 @@ def add_network_variables(
                 z_bounds,
                 network_name=name_prefix,
                 layer_name=f"{name_prefix}_layer_{layer_index}",
+                fix_stable_relu_binaries=fix_stable_relu_binaries,
             )
         )
         previous_vars = current_activation_vars
@@ -301,6 +316,7 @@ def encode_instance_direction(
     first_network: NeuralNetwork,
     second_network: NeuralNetwork,
     bounds: NetworkBounds,
+    fix_stable_relu_binaries: bool = True,
 ) -> EncodedDirection:
     model = pyo.ConcreteModel(
         name=f"{instance.instance_id}_{first_network_name}_minus_{second_network_name}"
@@ -324,6 +340,7 @@ def encode_instance_direction(
         first_network,
         first_network_name,
         bounds[first_network_name],
+        fix_stable_relu_binaries,
     )
     (
         second_output_vars,
@@ -337,6 +354,7 @@ def encode_instance_direction(
         second_network,
         second_network_name,
         bounds[second_network_name],
+        fix_stable_relu_binaries,
     )
     selector_binary_count = add_output_distance_constraint(
         model,

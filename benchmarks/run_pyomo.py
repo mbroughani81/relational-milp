@@ -202,6 +202,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--fix-stable-relu-binaries",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Explicitly fix binary phase variables for ReLUs proved stable by "
+            "their pre-activation bounds. Use --no-fix-stable-relu-binaries "
+            "to leave them free in the Pyomo model and let solver presolve "
+            "infer or eliminate them."
+        ),
+    )
+    parser.add_argument(
         "--csv",
         type=Path,
         default=None,
@@ -473,6 +484,7 @@ def solve_instance_direction(
     verbose: bool,
     debug: bool,
     bounds: encoder.NetworkBounds,
+    fix_stable_relu_binaries: bool,
 ) -> DirectionResult:
     encode_start = time.perf_counter()
     encoded = encoder.encode_instance_direction(
@@ -482,6 +494,7 @@ def solve_instance_direction(
         first_network,
         second_network,
         bounds,
+        fix_stable_relu_binaries=fix_stable_relu_binaries,
     )
     encode_runtime_sec = time.perf_counter() - encode_start
     model = encoded.model
@@ -569,6 +582,7 @@ def run_instance(
     abcrown_bound_cache: ABCrownBoundCache | None,
     verbose: bool = False,
     debug: bool = False,
+    fix_stable_relu_binaries: bool = True,
 ) -> InstanceResult:
     if debug and solver_name != "cplex":
         raise RuntimeError("--debug is currently supported only with --solver cplex")
@@ -590,6 +604,7 @@ def run_instance(
         verbose,
         debug,
         bounds,
+        fix_stable_relu_binaries,
     )
     second_result = solve_instance_direction(
         instance,
@@ -601,6 +616,7 @@ def run_instance(
         verbose,
         debug,
         bounds,
+        fix_stable_relu_binaries,
     )
     status = combine_directional_statuses([first_result.status, second_result.status])
     stats = [
@@ -946,6 +962,7 @@ def main() -> None:
                 abcrown_bound_cache,
                 args.verbose,
                 debug_enabled,
+                args.fix_stable_relu_binaries,
             )
             results.append(result)
             debug_payload = instance_debug_json(result) if debug_enabled else None
