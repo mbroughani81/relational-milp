@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 import importlib
 import json
-from pathlib import Path
 import time
-from typing import Any
-from typing import Literal
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal
 
 import pyomo.environ as pyo
 from pyomo.opt import TerminationCondition as TC
 from pyomo.repn import generate_standard_repn
 
+import nn_equivalence.encoder_pyomo as encoder
 from benchmarks.abcrown_bounds import (
     ABCrownBoundCache,
     ABCrownBoundOptions,
@@ -29,7 +29,6 @@ from benchmarks.common import (
     parse_suite_options,
     validate_instance,
 )
-import nn_equivalence.encoder_pyomo as encoder
 from nn_equivalence.nn_types import Bounds, NeuralNetwork
 
 BoundTighteningMode = Literal["interval", "abcrown"]
@@ -62,7 +61,6 @@ class ModelBinaryStats:
 class CplexDebugStats:
     loaded_model_stats: ModelBinaryStats | None
     after_presolve_stats: ModelBinaryStats | None
-    after_presolve_network_stats: list[encoder.ReLUBinaryStats]
     progress_details: list[tuple[str, str | int | float]]
     presolve_runtime_sec: float
 
@@ -218,7 +216,9 @@ def pyomo_solver_name(solver_name: SolverName) -> str:
     return solver_name
 
 
-def set_solver_timeout(solver: Any, solver_name: SolverName, timeout_sec: float) -> None:
+def set_solver_timeout(
+    solver: Any, solver_name: SolverName, timeout_sec: float
+) -> None:
     if hasattr(solver, "options"):
         if solver_name == "gurobi":
             solver.options["TimeLimit"] = timeout_sec
@@ -314,73 +314,17 @@ def cplex_loaded_model_stats(solver: Any) -> ModelBinaryStats | None:
     )
 
 
-def empty_relu_binary_stats(network_name: str) -> encoder.ReLUBinaryStats:
-    return encoder.ReLUBinaryStats(
-        network_name=network_name,
-        all_binary_variables=0,
-        relu_binary_variables=0,
-        stable_active_relu_binary_variables=0,
-        stable_inactive_relu_binary_variables=0,
-        unstable_relu_binary_variables=0,
-        unfixed_binary_variables=0,
-    )
-
-
-def increment_relu_binary_stats(
-    stats_by_network: dict[str, encoder.ReLUBinaryStats],
-    network_name: str,
-    phase: encoder.ReLUBinaryPhase,
-    unfixed: bool,
-) -> None:
-    current = stats_by_network[network_name]
-    stats_by_network[network_name] = encoder.ReLUBinaryStats(
-        network_name=network_name,
-        all_binary_variables=current.all_binary_variables + 1,
-        relu_binary_variables=current.relu_binary_variables + 1,
-        stable_active_relu_binary_variables=(
-            current.stable_active_relu_binary_variables
-            + (1 if phase == "stable_active" else 0)
-        ),
-        stable_inactive_relu_binary_variables=(
-            current.stable_inactive_relu_binary_variables
-            + (1 if phase == "stable_inactive" else 0)
-        ),
-        unstable_relu_binary_variables=(
-            current.unstable_relu_binary_variables
-            + (1 if phase == "unstable" else 0)
-        ),
-        unfixed_binary_variables=(
-            current.unfixed_binary_variables + (1 if unfixed else 0)
-        ),
-    )
-
-
-def cplex_after_presolve_stats(
-    solver: Any,
-    encoding_stats: encoder.EncodingDebugStats,
-) -> tuple[ModelBinaryStats | None, list[encoder.ReLUBinaryStats]]:
+def cplex_after_presolve_stats(solver: Any) -> ModelBinaryStats | None:
     solver_model = getattr(solver, "_solver_model", None)
     if solver_model is None or not hasattr(solver_model, "presolve"):
-        return None, []
+        return None
 
     solver_model.presolve.presolve(solver_model.presolve.method.primal)
     presolved_col_status = solver_model.presolve.get_presolved_col_status()
     presolved_row_status = solver_model.presolve.get_presolved_row_status()
-    variable_names = list(solver_model.variables.get_names())
     variable_types = list(solver_model.variables.get_types())
     lower_bounds = list(solver_model.variables.get_lower_bounds())
     upper_bounds = list(solver_model.variables.get_upper_bounds())
-    solver_to_pyomo = getattr(solver, "_solver_var_to_pyomo_var_map", {})
-    relu_variables = {
-        id(relu_variable.var): relu_variable
-        for relu_variable in encoding_stats.relu_binary_variables
-    }
-    stats_by_network = {
-        network_stats.network_name: empty_relu_binary_stats(
-            network_stats.network_name
-        )
-        for network_stats in encoding_stats.network_stats
-    }
 
     binary_count = 0
     unfixed_binary_count = 0
@@ -388,25 +332,12 @@ def cplex_after_presolve_stats(
         if original_index < 0:
             continue
 
-        is_binary = (
-            variable_types[original_index] == solver_model.variables.type.binary
-        )
+        is_binary = variable_types[original_index] == solver_model.variables.type.binary
         unfixed = lower_bounds[original_index] != upper_bounds[original_index]
         if is_binary:
             binary_count += 1
             if unfixed:
                 unfixed_binary_count += 1
-
-        variable_name = variable_names[original_index]
-        pyomo_var = solver_to_pyomo.get(variable_name)
-        relu_variable = relu_variables.get(id(pyomo_var))
-        if relu_variable is not None:
-            increment_relu_binary_stats(
-                stats_by_network,
-                relu_variable.network_name,
-                relu_variable.phase,
-                unfixed,
-            )
 
     stats = ModelBinaryStats(
         rows=len(presolved_row_status),
@@ -415,7 +346,7 @@ def cplex_after_presolve_stats(
         all_binary_variables=binary_count,
         unfixed_binary_variables=unfixed_binary_count,
     )
-    return stats, list(stats_by_network.values())
+    return stats
 
 
 def cplex_progress_details(solver: Any) -> list[tuple[str, str | int | float]]:
@@ -444,24 +375,17 @@ def cplex_progress_details(solver: Any) -> list[tuple[str, str | int | float]]:
     return details
 
 
-def cplex_debug_stats(
-    solver: Any,
-    encoding_stats: encoder.EncodingDebugStats,
-) -> CplexDebugStats:
+def cplex_debug_stats(solver: Any) -> CplexDebugStats:
     loaded_model_stats = cplex_loaded_model_stats(solver)
 
     presolve_start = time.perf_counter()
-    after_presolve_stats, after_presolve_network_stats = cplex_after_presolve_stats(
-        solver,
-        encoding_stats,
-    )
+    after_presolve_stats = cplex_after_presolve_stats(solver)
     presolve_runtime_sec = time.perf_counter() - presolve_start
     progress_details = cplex_progress_details(solver)
 
     return CplexDebugStats(
         loaded_model_stats=loaded_model_stats,
         after_presolve_stats=after_presolve_stats,
-        after_presolve_network_stats=after_presolve_network_stats,
         progress_details=progress_details,
         presolve_runtime_sec=presolve_runtime_sec,
     )
@@ -514,36 +438,7 @@ def direction_debug_details(
         ("all_binary_variables", encoding_stats.all_binary_variables),
         ("unfixed_binary_variables", encoding_stats.unfixed_binary_variables),
     ]
-    for network_stats in encoding_stats.network_stats:
-        prefix = f"before_presolve_{network_stats.network_name}"
-        details.extend(
-            [
-                (
-                    f"{prefix}_all_binary_variables",
-                    network_stats.all_binary_variables,
-                ),
-                (
-                    f"{prefix}_relu_binary_variables",
-                    network_stats.relu_binary_variables,
-                ),
-                (
-                    f"{prefix}_stable_active_relu_binary_variables",
-                    network_stats.stable_active_relu_binary_variables,
-                ),
-                (
-                    f"{prefix}_stable_inactive_relu_binary_variables",
-                    network_stats.stable_inactive_relu_binary_variables,
-                ),
-                (
-                    f"{prefix}_unstable_relu_binary_variables",
-                    network_stats.unstable_relu_binary_variables,
-                ),
-                (
-                    f"{prefix}_unfixed_binary_variables",
-                    network_stats.unfixed_binary_variables,
-                ),
-            ]
-        )
+
     details.extend(model_stats_details("before_presolve", before_presolve_stats))
     if cplex_stats.loaded_model_stats is None:
         details.append(("cplex_loaded_model_stats", "unavailable"))
@@ -563,36 +458,7 @@ def direction_debug_details(
                 cplex_stats.after_presolve_stats,
             )
         )
-    for network_stats in cplex_stats.after_presolve_network_stats:
-        prefix = f"after_presolve_{network_stats.network_name}"
-        details.extend(
-            [
-                (
-                    f"{prefix}_all_binary_variables",
-                    network_stats.all_binary_variables,
-                ),
-                (
-                    f"{prefix}_relu_binary_variables",
-                    network_stats.relu_binary_variables,
-                ),
-                (
-                    f"{prefix}_stable_active_relu_binary_variables",
-                    network_stats.stable_active_relu_binary_variables,
-                ),
-                (
-                    f"{prefix}_stable_inactive_relu_binary_variables",
-                    network_stats.stable_inactive_relu_binary_variables,
-                ),
-                (
-                    f"{prefix}_unstable_relu_binary_variables",
-                    network_stats.unstable_relu_binary_variables,
-                ),
-                (
-                    f"{prefix}_unfixed_binary_variables",
-                    network_stats.unfixed_binary_variables,
-                ),
-            ]
-        )
+
     details.extend(cplex_stats.progress_details)
     return details
 
@@ -656,10 +522,12 @@ def solve_instance_direction(
     debug_timings: list[tuple[str, float]] = []
     if debug:
         if solver_name != "cplex":
-            raise RuntimeError("--debug is currently supported only with --solver cplex")
+            raise RuntimeError(
+                "--debug is currently supported only with --solver cplex"
+            )
         if before_presolve_stats is None:
             raise ValueError("debug enabled without before-presolve stats")
-        cplex_stats = cplex_debug_stats(solver, encoded.debug_stats)
+        cplex_stats = cplex_debug_stats(solver)
         details = direction_debug_details(
             encoded.debug_stats,
             before_presolve_stats,
@@ -920,8 +788,7 @@ def format_solve_stats(stats: list[SolveStats]) -> str:
     parts = []
     for solve_stats in stats:
         timing_text = ",".join(
-            f"{phase}={runtime_sec:.3f}"
-            for phase, runtime_sec in solve_stats.timings
+            f"{phase}={runtime_sec:.3f}" for phase, runtime_sec in solve_stats.timings
         )
         parts.append(f"{solve_stats.name}[{timing_text}]")
     measured_total_sec = sum(solve_stats.measured_total_sec for solve_stats in stats)
@@ -955,40 +822,6 @@ def model_stats_json(
     }
 
 
-def network_relu_stats_json(
-    details: dict[str, str | int | float],
-    prefix: str,
-    network_name: str,
-) -> dict[str, str | int | float | None]:
-    full_prefix = f"{prefix}_{network_name}"
-    return {
-        "all_binary_variables": detail_value(
-            details,
-            f"{full_prefix}_all_binary_variables",
-        ),
-        "relu_binary_variables": detail_value(
-            details,
-            f"{full_prefix}_relu_binary_variables",
-        ),
-        "stable_active_relu_binary_variables": detail_value(
-            details,
-            f"{full_prefix}_stable_active_relu_binary_variables",
-        ),
-        "stable_inactive_relu_binary_variables": detail_value(
-            details,
-            f"{full_prefix}_stable_inactive_relu_binary_variables",
-        ),
-        "unstable_relu_binary_variables": detail_value(
-            details,
-            f"{full_prefix}_unstable_relu_binary_variables",
-        ),
-        "unfixed_binary_variables": detail_value(
-            details,
-            f"{full_prefix}_unfixed_binary_variables",
-        ),
-    }
-
-
 def solve_stats_debug_json(solve_stats: SolveStats) -> dict[str, Any]:
     details = dict(solve_stats.details)
     return {
@@ -996,56 +829,26 @@ def solve_stats_debug_json(solve_stats: SolveStats) -> dict[str, Any]:
         "timings_sec": {
             phase: runtime_sec for phase, runtime_sec in solve_stats.timings
         },
-        "binary_variables": {
-            "total": {
-                "all_binary_variables": detail_value(
-                    details,
-                    "all_binary_variables",
-                ),
-                "unfixed_binary_variables": detail_value(
-                    details,
-                    "unfixed_binary_variables",
-                ),
-                "output_selector_binary_variables": detail_value(
-                    details,
-                    "output_selector_binary_variables",
-                ),
-            },
-            "before_presolve": {
-                "model": model_stats_json(details, "before_presolve"),
-                "networks": {
-                    "nn1": network_relu_stats_json(
-                        details,
-                        "before_presolve",
-                        "nn1",
-                    ),
-                    "nn2": network_relu_stats_json(
-                        details,
-                        "before_presolve",
-                        "nn2",
-                    ),
-                },
-            },
-            "cplex_loaded_model": model_stats_json(
+        "total": {
+            "all_binary_variables": detail_value(
                 details,
-                "cplex_loaded_model",
+                "all_binary_variables",
             ),
-            "after_presolve": {
-                "model": model_stats_json(details, "after_presolve"),
-                "networks": {
-                    "nn1": network_relu_stats_json(
-                        details,
-                        "after_presolve",
-                        "nn1",
-                    ),
-                    "nn2": network_relu_stats_json(
-                        details,
-                        "after_presolve",
-                        "nn2",
-                    ),
-                },
-            },
+            "unfixed_binary_variables": detail_value(
+                details,
+                "unfixed_binary_variables",
+            ),
+            "output_selector_binary_variables": detail_value(
+                details,
+                "output_selector_binary_variables",
+            ),
         },
+        "before_presolve": model_stats_json(details, "before_presolve"),
+        "cplex_loaded_model": model_stats_json(
+            details,
+            "cplex_loaded_model",
+        ),
+        "after_presolve": model_stats_json(details, "after_presolve"),
         "cplex_progress": {
             name: value
             for name, value in details.items()
