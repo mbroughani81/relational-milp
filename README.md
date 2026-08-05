@@ -84,6 +84,32 @@ python3 -m benchmarks.run_pyomo --suite synthetic --solver highs > synthetic_hig
 python3 summarize_out_csv.py synthetic_highs.csv
 ```
 
+### CPLEX debug and presolve statistics
+
+Capture structured CPLEX statistics without running a second diagnostic
+presolve pass:
+
+```bash
+python3 -m benchmarks.run_pyomo \
+  --suite mnist_reludiff \
+  --solver cplex \
+  --debug-out artifacts/cplex_debug.json \
+  --suite-options networks=mnist_relu_3_100 \
+  --suite-options modes=global \
+  --suite-options limit=10 \
+  --suite-options timeout=60
+```
+
+The runner captures the log produced by the actual `solver.solve(...)` call.
+`cplex_presolve.initial_time_sec` and `after_presolve` are parsed from the first
+CPLEX presolve summary. `cplex_presolve.total_reported_time_sec` sums every
+`Presolve time` entry because CPLEX may run additional presolve passes during
+root processing. The reduced-MIP log reports total binary columns but not a
+separate unfixed-binary count, so
+`after_presolve.unfixed_binary_variables` is reported as `unavailable`. Add
+`--debug` to print the same structured JSON to stdout and `--verbose` to also
+print the raw CPLEX log.
+
 Save backend solver logs and per-direction wall-clock timings while keeping CSV
 results on stdout:
 

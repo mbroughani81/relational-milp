@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,7 @@ from benchmarks.abcrown_bounds import (
     ABCrownBoundOptions,
     compute_network_bounds,
 )
+from benchmarks.cplex_log import CplexPresolveLogStats, parse_cplex_presolve_log
 from benchmarks.common import (
     Hyperrectangle,
     Instance,
@@ -62,7 +64,7 @@ class CplexDebugStats:
     loaded_model_stats: ModelBinaryStats | None
     after_presolve_stats: ModelBinaryStats | None
     progress_details: list[tuple[str, str | int | float]]
-    presolve_runtime_sec: float
+    presolve_log_stats: CplexPresolveLogStats
 
 
 def load_suite(name: str, suite_options: SuiteOptions) -> InstanceSuite:
@@ -181,8 +183,8 @@ def parse_args() -> argparse.Namespace:
         "--debug",
         action="store_true",
         help=(
-            "Print CPLEX-only structured model-size, ReLU-binary, presolve, "
-            "and solver-progress details."
+            "Print CPLEX-only structured model-size, ReLU-binary, actual "
+            "solve presolve-log, and solver-progress details."
         ),
     )
     parser.add_argument(
@@ -325,41 +327,6 @@ def cplex_loaded_model_stats(solver: Any) -> ModelBinaryStats | None:
     )
 
 
-def cplex_after_presolve_stats(solver: Any) -> ModelBinaryStats | None:
-    solver_model = getattr(solver, "_solver_model", None)
-    if solver_model is None or not hasattr(solver_model, "presolve"):
-        return None
-
-    solver_model.presolve.presolve(solver_model.presolve.method.primal)
-    presolved_col_status = solver_model.presolve.get_presolved_col_status()
-    presolved_row_status = solver_model.presolve.get_presolved_row_status()
-    variable_types = list(solver_model.variables.get_types())
-    lower_bounds = list(solver_model.variables.get_lower_bounds())
-    upper_bounds = list(solver_model.variables.get_upper_bounds())
-
-    binary_count = 0
-    unfixed_binary_count = 0
-    for original_index in presolved_col_status:
-        if original_index < 0:
-            continue
-
-        is_binary = variable_types[original_index] == solver_model.variables.type.binary
-        unfixed = lower_bounds[original_index] != upper_bounds[original_index]
-        if is_binary:
-            binary_count += 1
-            if unfixed:
-                unfixed_binary_count += 1
-
-    stats = ModelBinaryStats(
-        rows=len(presolved_row_status),
-        cols=len(presolved_col_status),
-        nonzeros="unavailable",
-        all_binary_variables=binary_count,
-        unfixed_binary_variables=unfixed_binary_count,
-    )
-    return stats
-
-
 def cplex_progress_details(solver: Any) -> list[tuple[str, str | int | float]]:
     solver_model = getattr(solver, "_solver_model", None)
     if solver_model is None or not hasattr(solver_model, "solution"):
@@ -386,19 +353,50 @@ def cplex_progress_details(solver: Any) -> list[tuple[str, str | int | float]]:
     return details
 
 
-def cplex_debug_stats(solver: Any) -> CplexDebugStats:
+def cplex_debug_stats(solver: Any, solve_log_text: str) -> CplexDebugStats:
     loaded_model_stats = cplex_loaded_model_stats(solver)
+    presolve_log_stats = parse_cplex_presolve_log(solve_log_text)
 
-    presolve_start = time.perf_counter()
-    after_presolve_stats = cplex_after_presolve_stats(solver)
-    presolve_runtime_sec = time.perf_counter() - presolve_start
-    progress_details = cplex_progress_details(solver)
+    reduced_values = (
+        presolve_log_stats.reduced_rows,
+        presolve_log_stats.reduced_columns,
+        presolve_log_stats.reduced_nonzeros,
+        presolve_log_stats.reduced_binary_variables,
+    )
+    after_presolve_stats = None
+    if any(value is not None for value in reduced_values):
+        after_presolve_stats = ModelBinaryStats(
+            rows=(
+                presolve_log_stats.reduced_rows
+                if presolve_log_stats.reduced_rows is not None
+                else "unavailable"
+            ),
+            cols=(
+                presolve_log_stats.reduced_columns
+                if presolve_log_stats.reduced_columns is not None
+                else "unavailable"
+            ),
+            nonzeros=(
+                presolve_log_stats.reduced_nonzeros
+                if presolve_log_stats.reduced_nonzeros is not None
+                else "unavailable"
+            ),
+            all_binary_variables=(
+                presolve_log_stats.reduced_binary_variables
+                if presolve_log_stats.reduced_binary_variables is not None
+                else "unavailable"
+            ),
+            # The CPLEX solve log reports the number of binary columns in
+            # the reduced MIP, but it does not separately report how many
+            # of those columns have equal lower and upper bounds.
+            unfixed_binary_variables="unavailable",
+        )
 
     return CplexDebugStats(
         loaded_model_stats=loaded_model_stats,
         after_presolve_stats=after_presolve_stats,
-        progress_details=progress_details,
-        presolve_runtime_sec=presolve_runtime_sec,
+        progress_details=cplex_progress_details(solver),
+        presolve_log_stats=presolve_log_stats,
     )
 
 
@@ -470,6 +468,41 @@ def direction_debug_details(
             )
         )
 
+    presolve = cplex_stats.presolve_log_stats
+    details.extend(
+        [
+            (
+                "actual_presolve_initial_time_sec",
+                presolve.initial_time_sec
+                if presolve.initial_time_sec is not None
+                else "unavailable",
+            ),
+            (
+                "actual_presolve_total_reported_time_sec",
+                presolve.total_reported_time_sec
+                if presolve.total_reported_time_sec is not None
+                else "unavailable",
+            ),
+            ("actual_presolve_time_entries", presolve.time_entries),
+            (
+                "presolve_eliminated_rows",
+                presolve.eliminated_rows
+                if presolve.eliminated_rows is not None
+                else "unavailable",
+            ),
+            (
+                "presolve_eliminated_columns",
+                presolve.eliminated_columns
+                if presolve.eliminated_columns is not None
+                else "unavailable",
+            ),
+            (
+                "presolve_all_rows_and_columns_eliminated",
+                "yes" if presolve.all_rows_and_columns_eliminated else "no",
+            ),
+        ]
+    )
+
     details.extend(cplex_stats.progress_details)
     return details
 
@@ -510,13 +543,32 @@ def solve_instance_direction(
     )
     solver_setup_runtime_sec = time.perf_counter() - solver_setup_start
 
-    start_time = time.perf_counter()
-    result = solver.solve(
-        model,
-        tee=verbose,
-        load_solutions=False,
-    )
-    runtime_sec = time.perf_counter() - start_time
+    cplex_solve_log = ""
+    if debug:
+        with tempfile.TemporaryDirectory(prefix="nn_eq_cplex_log_") as temp_dir:
+            log_path = Path(temp_dir) / "cplex_actual_solve.log"
+            start_time = time.perf_counter()
+            result = solver.solve(
+                model,
+                tee=verbose,
+                load_solutions=False,
+                logfile=str(log_path),
+            )
+            runtime_sec = time.perf_counter() - start_time
+            if log_path.exists():
+                cplex_solve_log = log_path.read_text(
+                    encoding="utf-8",
+                    errors="replace",
+                )
+    else:
+        start_time = time.perf_counter()
+        result = solver.solve(
+            model,
+            tee=verbose,
+            load_solutions=False,
+        )
+        runtime_sec = time.perf_counter() - start_time
+
     status = status_from_pyomo(result.solver.termination_condition)
 
     if status == "sat":
@@ -532,7 +584,6 @@ def solve_instance_direction(
 
     direction_name = f"{first_network_name}_minus_{second_network_name}"
     details: list[tuple[str, str | int | float]] = []
-    debug_timings: list[tuple[str, float]] = []
     if debug:
         if solver_name != "cplex":
             raise RuntimeError(
@@ -540,21 +591,17 @@ def solve_instance_direction(
             )
         if before_presolve_stats is None:
             raise ValueError("debug enabled without before-presolve stats")
-        cplex_stats = cplex_debug_stats(solver)
+        cplex_stats = cplex_debug_stats(solver, cplex_solve_log)
         details = direction_debug_details(
             encoded.debug_stats,
             before_presolve_stats,
             cplex_stats,
         )
-        debug_timings = [
-            ("presolve", cplex_stats.presolve_runtime_sec),
-        ]
     timings = [
         ("encode", encode_runtime_sec),
         ("solver_setup", solver_setup_runtime_sec),
         ("solve", runtime_sec),
     ]
-    timings.extend(debug_timings)
     return DirectionResult(
         status=status,
         stats=SolveStats(
@@ -865,6 +912,32 @@ def solve_stats_debug_json(solve_stats: SolveStats) -> dict[str, Any]:
             "cplex_loaded_model",
         ),
         "after_presolve": model_stats_json(details, "after_presolve"),
+        "cplex_presolve": {
+            "initial_time_sec": detail_value(
+                details,
+                "actual_presolve_initial_time_sec",
+            ),
+            "total_reported_time_sec": detail_value(
+                details,
+                "actual_presolve_total_reported_time_sec",
+            ),
+            "time_entries": detail_value(
+                details,
+                "actual_presolve_time_entries",
+            ),
+            "eliminated_rows": detail_value(
+                details,
+                "presolve_eliminated_rows",
+            ),
+            "eliminated_columns": detail_value(
+                details,
+                "presolve_eliminated_columns",
+            ),
+            "all_rows_and_columns_eliminated": detail_value(
+                details,
+                "presolve_all_rows_and_columns_eliminated",
+            ),
+        },
         "cplex_progress": {
             name: value
             for name, value in details.items()

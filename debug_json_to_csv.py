@@ -8,7 +8,7 @@ The script supports both:
 
 By default, it keeps the fields that are most useful for evaluating encoding and
 solver difficulty: identifiers/status, timings, binary-variable counts,
-before/after-presolve model sizes, and CPLEX progress.
+before/after-presolve model sizes, actual CPLEX presolve-log metrics, and CPLEX progress.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ DEFAULT_COLUMN_PATTERNS = [
     "total.*",
     "before_presolve.*",
     "after_presolve.*",
+    "cplex_presolve.*",
     "cplex_progress.*",
 ]
 
