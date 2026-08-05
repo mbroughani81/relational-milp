@@ -114,6 +114,7 @@ class Instance:
     nn2: NeuralNetwork
     input_region: AbstractPolytope
     epsilon: float
+    output_index: int = 0
     expected_status: InstanceStatus | None = None
     timeout_sec: float = 30.0
     metadata: dict[str, str | int | float] = field(default_factory=dict)
@@ -201,3 +202,10 @@ def validate_instance(instance: Instance) -> None:
             raise ValueError(f"layer {layer_index} output sizes differ")
         if len(weights1[0]) != len(weights2[0]):
             raise ValueError(f"layer {layer_index} input sizes differ")
+
+    output_size = len(instance.nn1[-1][1])
+    if instance.output_index < 0 or instance.output_index >= output_size:
+        raise ValueError(
+            "output_index is outside the network output range: "
+            f"index={instance.output_index}, output_size={output_size}"
+        )

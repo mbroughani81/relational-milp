@@ -23,6 +23,27 @@ External solver/runtime requirements:
   runner uses the high-level Python API and writes per-instance configs/results
   under `artifacts/abcrown_instances/`.
 
+Download the original ReluDiff MNIST networks and the paper's 100 test inputs:
+
+```bash
+python3 scripts/download_mnist_reludiff_nnets.py
+```
+
+The downloader reads the files from `DiffNN-Code/nnet` in the official
+ReluDiff artifact and validates the architectures before installing them under
+`data/reludiff_mnist/`. In particular, `mnist_relu_3_100` must be
+`784-100-100-100-10`; files with architecture `784-100-100-10-10` are rejected.
+
+Check the installed architecture headers without downloading anything:
+
+```bash
+python3 scripts/download_mnist_reludiff_nnets.py --check-only
+```
+
+The checker reads the files from `data/reludiff_mnist/` by default. Use
+`--output-dir PATH` when the `.nnet` files are stored elsewhere. It exits with
+status 1 if a file is missing, malformed, or has the wrong architecture.
+
 ## Run benchmarks
 
 Run the small smoke-test suite with Pyomo, using HiGHS solver:
@@ -125,9 +146,11 @@ python3 -m benchmarks.run_pyomo \
 - `sample`: three tiny 2-input instances. Includes slightly different networks
   at two epsilon values and an identical-network case. This is the fastest
   correctness smoke test.
-- `mnist_reludiff`: compares ReluDiff `.nnet` MNIST models with their float16
-  quantized versions. It supports `networks`, `modes`, `limit`, `timeout`,
-  `epsilon`, and `perturb` suite options.
+- `mnist_reludiff`: compares the original ReluDiff `.nnet` MNIST models with
+  their float16 quantized versions. For image label `c`, each instance verifies
+  `|nn1(x)[c] - nn2(x)[c]| <= epsilon`; it does not take a maximum over all ten
+  outputs. This matches the artifact's per-image target-output setup. It supports
+  `networks`, `modes`, `limit`, `timeout`, `epsilon`, and `perturb` suite options.
 - `synthetic`: deterministic random 2D ReLU networks with architecture
   `2-10-10-2`; compares a base network with a noisy perturbation at several
   epsilon values.

@@ -218,7 +218,7 @@ def add_network_variables(
     name_prefix: str,
     bound: list[Bounds],
     fix_stable_relu_binaries: bool,
-) -> tuple[list[PyomoVar], Bounds, ReLUBinaryStats, list[ReLUBinaryVariable]]:
+) -> tuple[list[PyomoVar], ReLUBinaryStats, list[ReLUBinaryVariable]]:
     if len(bound) != len(nn):
         raise ValueError(f"{name_prefix} bound layer count does not match network")
 
@@ -247,7 +247,7 @@ def add_network_variables(
 
         is_output_layer = layer_index == len(nn)
         if is_output_layer:
-            return current_vars, z_bounds, debug_stats, debug_variables
+            return current_vars, debug_stats, debug_variables
 
         current_activation_bounds = relu_bounds(z_bounds)
         current_activation_vars = add_vars(
@@ -273,40 +273,25 @@ def add_network_variables(
 
 
 def add_output_distance_constraint(
-    model: pyo.ConcreteModel,
     constraints: IndexedConstraint,
     first_output_vars: list[PyomoVar],
     second_output_vars: list[PyomoVar],
-    first_output_bounds: Bounds,
-    second_output_bounds: Bounds,
     epsilon: float,
-    name_prefix: str,
-) -> int:
+    output_index: int,
+) -> None:
+    if epsilon < 0:
+        raise ValueError("epsilon must be non-negative")
     if len(first_output_vars) != len(second_output_vars):
         raise ValueError("output variable lists must have the same length")
     if not first_output_vars:
         raise ValueError("output variable lists must be non-empty")
+    if output_index < 0 or output_index >= len(first_output_vars):
+        raise ValueError("output_index is outside the output variable range")
 
-    selectors = add_vars(
-        model,
-        f"{name_prefix}_selector",
-        [(0.0, 1.0)] * len(first_output_vars),
-        domain=pyo.Binary,
+    add_constraint(
+        constraints,
+        first_output_vars[output_index] - second_output_vars[output_index] >= epsilon,
     )
-    for index, (first_var, second_var) in enumerate(
-        zip(first_output_vars, second_output_vars)
-    ):
-        first_lower, _ = first_output_bounds[index]
-        _, second_upper = second_output_bounds[index]
-        min_difference = first_lower - second_upper
-        big_m = max(0.0, epsilon - min_difference)
-        add_constraint(
-            constraints,
-            first_var - second_var >= epsilon - big_m * (1 - selectors[index])
-        )
-
-    add_constraint(constraints, sum(selectors) >= 1)
-    return len(selectors)
 
 
 def encode_instance_direction(
@@ -330,7 +315,6 @@ def encode_instance_direction(
     add_input_region_constraints(constraints, input_vars, instance)
     (
         first_output_vars,
-        first_output_bounds,
         first_debug_stats,
         first_debug_variables,
     ) = add_network_variables(
@@ -344,7 +328,6 @@ def encode_instance_direction(
     )
     (
         second_output_vars,
-        second_output_bounds,
         second_debug_stats,
         second_debug_variables,
     ) = add_network_variables(
@@ -356,16 +339,14 @@ def encode_instance_direction(
         bounds[second_network_name],
         fix_stable_relu_binaries,
     )
-    selector_binary_count = add_output_distance_constraint(
-        model,
+    add_output_distance_constraint(
         constraints,
         first_output_vars,
         second_output_vars,
-        first_output_bounds,
-        second_output_bounds,
         instance.epsilon,
-        name_prefix=f"{first_network_name}_minus_{second_network_name}",
+        instance.output_index,
     )
+    selector_binary_count = 0
     model.objective = pyo.Objective(expr=0.0, sense=pyo.minimize)
 
     all_binary_variables = (
@@ -410,9 +391,9 @@ def validate_directional_witness(
     input_verified = contains(instance.input_region, input_values, WITNESS_TOLERANCE)
     first_outputs = forward_values(first_network, input_values)
     second_outputs = forward_values(second_network, input_values)
-    witness_margin = max(
-        first_output - second_output
-        for first_output, second_output in zip(first_outputs, second_outputs)
+    witness_margin = (
+        first_outputs[instance.output_index]
+        - second_outputs[instance.output_index]
     )
     target_verified = witness_margin >= instance.epsilon - WITNESS_TOLERANCE
     witness_verified = input_verified and target_verified
@@ -421,6 +402,7 @@ def validate_directional_witness(
             "Solver returned a feasible point, but the numeric witness did not "
             f"verify. direction={first_network_name}-{second_network_name}, "
             f"witness_margin={witness_margin}, required_margin={instance.epsilon}, "
+            f"output_index={instance.output_index}, "
             f"target_verified={target_verified}, input_verified={input_verified}",
             file=sys.stderr,
         )

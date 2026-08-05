@@ -21,6 +21,7 @@ def main() -> None:
     model.Params.OutputFlag = 0
 
     epsilon = 0.06
+    output_index = 0
     input_size = len(nn1[0][0][0])
     input_bounds = [(0.0, 1.0)] * input_size
     print(input_size)
@@ -52,7 +53,8 @@ def main() -> None:
         model,
         nn1_output_vars,
         nn2_output_vars,
-        epsilon
+        epsilon,
+        output_index,
     )
 
     # solving
@@ -69,16 +71,15 @@ def main() -> None:
         x_values = [var.X for var in x]
         nn1_output_values = [var.X for var in nn1_output_vars]
         nn2_output_values = [var.X for var in nn2_output_vars]
-        differences = [
-            abs(first - second)
-            for first, second in zip(nn1_output_values, nn2_output_values)
-        ]
+        target_difference = abs(
+            nn1_output_values[output_index] - nn2_output_values[output_index]
+        )
 
         print(f"x: {x_values}")
         print(f"nn1 output: {nn1_output_values}")
         print(f"nn2 output: {nn2_output_values}")
-        print(f"absolute differences: {differences}")
-        print(f"L-inf difference: {max(differences)}")
+        print(f"output index: {output_index}")
+        print(f"absolute difference: {target_difference}")
         print("equivalent: no")
     elif model.Status == gp.GRB.INFEASIBLE:
         print("equivalent: yes")

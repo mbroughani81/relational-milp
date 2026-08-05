@@ -1,6 +1,8 @@
 from typing import Any
 
-import pyomo.environ as pyo
+import pytest
+
+pyo = pytest.importorskip("pyomo.environ")
 
 from benchmarks.common import (
     HalfSpace,
@@ -9,7 +11,10 @@ from benchmarks.common import (
     Instance,
 )
 from benchmarks.run_pyomo import run_instance
-from nn_equivalence.encoder_pyomo import validate_directional_witness
+from nn_equivalence.encoder_pyomo import (
+    add_output_distance_constraint,
+    validate_directional_witness,
+)
 
 
 def make_instance(epsilon: float) -> Instance:
@@ -88,3 +93,54 @@ def test_run_instance_respects_polyhedral_input_constraints() -> None:
     )
 
     assert result.status == "unsat"
+
+
+def test_output_distance_constraint_uses_only_selected_output() -> None:
+    model = pyo.ConcreteModel()
+    model.constraints = pyo.Constraint(pyo.Any)
+    model.first = pyo.Var(range(3))
+    model.second = pyo.Var(range(3))
+
+    add_output_distance_constraint(
+        model.constraints,
+        [model.first[index] for index in range(3)],
+        [model.second[index] for index in range(3)],
+        epsilon=0.5,
+        output_index=1,
+    )
+
+    assert len(model.constraints) == 1
+    expression = str(model.constraints[0].expr)
+    assert "first[1]" in expression
+    assert "second[1]" in expression
+    assert "first[0]" not in expression
+    assert "first[2]" not in expression
+    assert not any(
+        variable.is_binary()
+        for variable in model.component_data_objects(pyo.Var)
+    )
+
+
+def test_validate_witness_ignores_non_target_output_violation(capsys) -> None:
+    instance = Instance(
+        instance_id="target_output_instance",
+        suite_name="test",
+        nn1=[([[10.0], [1.0]], [0.0, 0.0])],
+        nn2=[([[0.0], [0.0]], [0.0, 0.0])],
+        input_region=Hyperrectangle(low=[0.0], high=[1.0]),
+        epsilon=0.5,
+        output_index=1,
+    )
+
+    validate_directional_witness(
+        instance,
+        make_input_var(0.2),
+        "nn1",
+        "nn2",
+        instance.nn1,
+        instance.nn2,
+    )
+
+    err = capsys.readouterr().err
+    assert "target_verified=False" in err
+    assert "output_index=1" in err

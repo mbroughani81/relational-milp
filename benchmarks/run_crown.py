@@ -185,17 +185,24 @@ class DifferenceNetwork(nn.Module):
 
 
 class SafetyMarginNetwork(nn.Module):
-    def __init__(self, nn1: NeuralNetwork, nn2: NeuralNetwork, epsilon: float) -> None:
+    def __init__(
+        self,
+        nn1: NeuralNetwork,
+        nn2: NeuralNetwork,
+        epsilon: float,
+        output_index: int,
+    ) -> None:
         super().__init__()
         self.diff = DifferenceNetwork(nn1, nn2)
         output_dim = len(nn1[-1][1])
-        self.margin = nn.Linear(output_dim, 2 * output_dim)
+        if output_index < 0 or output_index >= output_dim:
+            raise ValueError("output_index is outside the network output range")
+        self.margin = nn.Linear(output_dim, 2)
         with torch.no_grad():
             self.margin.weight.zero_()
             self.margin.bias.fill_(epsilon)
-            for output_index in range(output_dim):
-                self.margin.weight[output_index, output_index] = -1.0
-                self.margin.weight[output_dim + output_index, output_index] = 1.0
+            self.margin.weight[0, output_index] = -1.0
+            self.margin.weight[1, output_index] = 1.0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.margin(self.diff(x))
@@ -273,7 +280,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def model_key(instance: Instance) -> str:
-    payload = json.dumps([instance.nn1, instance.nn2, instance.epsilon], sort_keys=True)
+    payload = json.dumps(
+        [instance.nn1, instance.nn2, instance.epsilon, instance.output_index],
+        sort_keys=True,
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
@@ -287,29 +297,29 @@ def model_for_instance(
             instance.nn1,
             instance.nn2,
             instance.epsilon,
+            instance.output_index,
         ).eval()
     return models[key]
 
 
 def write_manifest(path: Path, instances: list[Instance]) -> None:
-    lines = ["index,instance_id,epsilon,expected_status,timeout\n"]
+    lines = [
+        "index,instance_id,epsilon,output_index,expected_status,timeout\n"
+    ]
     for index, instance in enumerate(instances):
         expected = instance.expected_status or ""
         lines.append(
             f"{index},{instance.instance_id},{instance.epsilon:.17g},"
+            f"{instance.output_index},"
             f"{expected},{instance.timeout_sec:.17g}\n"
         )
     path.write_text("".join(lines), encoding="utf-8")
 
 
 def suite_margin_output_dim(instances: list[Instance]) -> int:
-    output_dims = {len(instance.nn1[-1][1]) for instance in instances}
-    if len(output_dims) != 1:
-        raise ValueError(
-            "alpha-beta-CROWN config requires one data.num_outputs value; "
-            f"got output dimensions {sorted(output_dims)}"
-        )
-    return 2 * output_dims.pop()
+    if not instances:
+        raise ValueError("alpha-beta-CROWN requires at least one instance")
+    return 2
 
 
 def merge_config(base: ConfigDict, override: ConfigDict) -> ConfigDict:
@@ -380,7 +390,7 @@ def make_constraints(
     input_box = Hyperrectangle.overapproximate(instance.input_region)
     input_bounds = input_box.bounds()
     input_dim = len(input_bounds)
-    output_dim = 2 * len(instance.nn1[-1][1])
+    output_dim = 2
     x = input_vars_fn(input_dim)
     y = output_vars_fn(output_dim)
     lower = torch.tensor([bound[0] for bound in input_bounds], dtype=torch.float32)

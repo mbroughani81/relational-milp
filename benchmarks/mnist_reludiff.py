@@ -15,6 +15,7 @@ from nn_equivalence.reludiff_nnet import (
     load_nnet_layers,
     load_reludiff_mnist_tests,
     quantize_network_float16,
+    validate_mnist_reludiff_network,
 )
 from nn_equivalence.nn_types import NeuralNetwork
 
@@ -97,7 +98,13 @@ def _load_network_pairs(
 ) -> dict[str, tuple[NeuralNetwork, NeuralNetwork]]:
     pairs: dict[str, tuple[NeuralNetwork, NeuralNetwork]] = {}
     for network_name in network_names:
-        original = load_nnet_layers(data_dir / f"{network_name}.nnet")
+        network_path = data_dir / f"{network_name}.nnet"
+        original = load_nnet_layers(network_path)
+        validate_mnist_reludiff_network(
+            network_name,
+            original,
+            source_path=network_path,
+        )
         pairs[network_name] = (original, quantize_network_float16(original))
     return pairs
 
@@ -163,12 +170,14 @@ def load_suite(suite_options: SuiteOptions | None = None) -> InstanceSuite:
                         nn2=quantized,
                         input_region=input_region,
                         epsilon=epsilon,
+                        output_index=labels[sample_index],
                         expected_status=None,
                         timeout_sec=timeout_sec,
                         metadata={
                             "network": network_name,
                             "sample_index": sample_index,
                             "correct_class": labels[sample_index],
+                            "output_index": labels[sample_index],
                             "input_mode": mode,
                             "perturb": perturb_metadata,
                             "quantization": "float32_to_float16",
