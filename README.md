@@ -122,14 +122,11 @@ python3 -m benchmarks.run_pyomo \
 ```
 
 The runner captures the log produced by the actual `solver.solve(...)` call.
-`cplex_presolve.initial_time_sec` and `after_presolve` are parsed from the first
-CPLEX presolve summary. `cplex_presolve.total_reported_time_sec` sums every
-`Presolve time` entry because CPLEX may run additional presolve passes during
-root processing. The reduced-MIP log reports total binary columns but not a
-separate unfixed-binary count, so
-`after_presolve.unfixed_binary_variables` is reported as `unavailable`. Add
-`--debug` to print the same structured JSON to stdout and `--verbose` to also
-print the raw CPLEX log.
+`after_presolve.time_sec` and `after_presolve.binary_variables` are parsed from
+the first CPLEX presolve summary. The time is the `Presolve time` value for
+that summary, and the binary count is the number of binary columns in the
+reduced MIP. Add `--debug` to print the same structured JSON to stdout and
+`--verbose` to also print the raw CPLEX log.
 
 Save backend solver logs and per-direction wall-clock timings while keeping CSV
 results on stdout:

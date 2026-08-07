@@ -61,10 +61,8 @@ class ModelBinaryStats:
 
 @dataclass(frozen=True)
 class CplexDebugStats:
-    loaded_model_stats: ModelBinaryStats | None
-    after_presolve_stats: ModelBinaryStats | None
+    after_presolve_stats: CplexPresolveLogStats
     progress_details: list[tuple[str, str | int | float]]
-    presolve_log_stats: CplexPresolveLogStats
 
 
 def load_suite(name: str, suite_options: SuiteOptions) -> InstanceSuite:
@@ -298,35 +296,6 @@ def pyomo_model_stats(model: pyo.ConcreteModel) -> ModelBinaryStats:
     )
 
 
-def cplex_loaded_model_stats(solver: Any) -> ModelBinaryStats | None:
-    solver_model = getattr(solver, "_solver_model", None)
-    if solver_model is None or not hasattr(solver_model, "variables"):
-        return None
-
-    variable_types = list(solver_model.variables.get_types())
-    lower_bounds = list(solver_model.variables.get_lower_bounds())
-    upper_bounds = list(solver_model.variables.get_upper_bounds())
-    binary_count = 0
-    unfixed_binary_count = 0
-    for variable_type, lower_bound, upper_bound in zip(
-        variable_types,
-        lower_bounds,
-        upper_bounds,
-    ):
-        if variable_type == solver_model.variables.type.binary:
-            binary_count += 1
-            if lower_bound != upper_bound:
-                unfixed_binary_count += 1
-
-    return ModelBinaryStats(
-        rows=solver_model.linear_constraints.get_num(),
-        cols=solver_model.variables.get_num(),
-        nonzeros=solver_model.linear_constraints.get_num_nonzeros(),
-        all_binary_variables=binary_count,
-        unfixed_binary_variables=unfixed_binary_count,
-    )
-
-
 def cplex_progress_details(solver: Any) -> list[tuple[str, str | int | float]]:
     solver_model = getattr(solver, "_solver_model", None)
     if solver_model is None or not hasattr(solver_model, "solution"):
@@ -354,49 +323,11 @@ def cplex_progress_details(solver: Any) -> list[tuple[str, str | int | float]]:
 
 
 def cplex_debug_stats(solver: Any, solve_log_text: str) -> CplexDebugStats:
-    loaded_model_stats = cplex_loaded_model_stats(solver)
     presolve_log_stats = parse_cplex_presolve_log(solve_log_text)
 
-    reduced_values = (
-        presolve_log_stats.reduced_rows,
-        presolve_log_stats.reduced_columns,
-        presolve_log_stats.reduced_nonzeros,
-        presolve_log_stats.reduced_binary_variables,
-    )
-    after_presolve_stats = None
-    if any(value is not None for value in reduced_values):
-        after_presolve_stats = ModelBinaryStats(
-            rows=(
-                presolve_log_stats.reduced_rows
-                if presolve_log_stats.reduced_rows is not None
-                else "unavailable"
-            ),
-            cols=(
-                presolve_log_stats.reduced_columns
-                if presolve_log_stats.reduced_columns is not None
-                else "unavailable"
-            ),
-            nonzeros=(
-                presolve_log_stats.reduced_nonzeros
-                if presolve_log_stats.reduced_nonzeros is not None
-                else "unavailable"
-            ),
-            all_binary_variables=(
-                presolve_log_stats.reduced_binary_variables
-                if presolve_log_stats.reduced_binary_variables is not None
-                else "unavailable"
-            ),
-            # The CPLEX solve log reports the number of binary columns in
-            # the reduced MIP, but it does not separately report how many
-            # of those columns have equal lower and upper bounds.
-            unfixed_binary_variables="unavailable",
-        )
-
     return CplexDebugStats(
-        loaded_model_stats=loaded_model_stats,
-        after_presolve_stats=after_presolve_stats,
+        after_presolve_stats=presolve_log_stats,
         progress_details=cplex_progress_details(solver),
-        presolve_log_stats=presolve_log_stats,
     )
 
 
@@ -449,56 +380,21 @@ def direction_debug_details(
     ]
 
     details.extend(model_stats_details("before_presolve", before_presolve_stats))
-    if cplex_stats.loaded_model_stats is None:
-        details.append(("cplex_loaded_model_stats", "unavailable"))
-    else:
-        details.extend(
-            model_stats_details(
-                "cplex_loaded_model",
-                cplex_stats.loaded_model_stats,
-            )
-        )
-    if cplex_stats.after_presolve_stats is None:
-        details.append(("after_presolve_stats", "unavailable"))
-    else:
-        details.extend(
-            model_stats_details(
-                "after_presolve",
-                cplex_stats.after_presolve_stats,
-            )
-        )
 
-    presolve = cplex_stats.presolve_log_stats
+    presolve = cplex_stats.after_presolve_stats
     details.extend(
         [
             (
-                "actual_presolve_initial_time_sec",
+                "after_presolve_time_sec",
                 presolve.initial_time_sec
                 if presolve.initial_time_sec is not None
                 else "unavailable",
             ),
             (
-                "actual_presolve_total_reported_time_sec",
-                presolve.total_reported_time_sec
-                if presolve.total_reported_time_sec is not None
+                "after_presolve_binary_variables",
+                presolve.reduced_binary_variables
+                if presolve.reduced_binary_variables is not None
                 else "unavailable",
-            ),
-            ("actual_presolve_time_entries", presolve.time_entries),
-            (
-                "presolve_eliminated_rows",
-                presolve.eliminated_rows
-                if presolve.eliminated_rows is not None
-                else "unavailable",
-            ),
-            (
-                "presolve_eliminated_columns",
-                presolve.eliminated_columns
-                if presolve.eliminated_columns is not None
-                else "unavailable",
-            ),
-            (
-                "presolve_all_rows_and_columns_eliminated",
-                "yes" if presolve.all_rows_and_columns_eliminated else "no",
             ),
         ]
     )
@@ -885,6 +781,18 @@ def model_stats_json(
     }
 
 
+def after_presolve_json(
+    details: dict[str, str | int | float],
+) -> dict[str, str | int | float | None]:
+    return {
+        "time_sec": detail_value(details, "after_presolve_time_sec"),
+        "binary_variables": detail_value(
+            details,
+            "after_presolve_binary_variables",
+        ),
+    }
+
+
 def solve_stats_debug_json(solve_stats: SolveStats) -> dict[str, Any]:
     details = dict(solve_stats.details)
     return {
@@ -907,37 +815,7 @@ def solve_stats_debug_json(solve_stats: SolveStats) -> dict[str, Any]:
             ),
         },
         "before_presolve": model_stats_json(details, "before_presolve"),
-        "cplex_loaded_model": model_stats_json(
-            details,
-            "cplex_loaded_model",
-        ),
-        "after_presolve": model_stats_json(details, "after_presolve"),
-        "cplex_presolve": {
-            "initial_time_sec": detail_value(
-                details,
-                "actual_presolve_initial_time_sec",
-            ),
-            "total_reported_time_sec": detail_value(
-                details,
-                "actual_presolve_total_reported_time_sec",
-            ),
-            "time_entries": detail_value(
-                details,
-                "actual_presolve_time_entries",
-            ),
-            "eliminated_rows": detail_value(
-                details,
-                "presolve_eliminated_rows",
-            ),
-            "eliminated_columns": detail_value(
-                details,
-                "presolve_eliminated_columns",
-            ),
-            "all_rows_and_columns_eliminated": detail_value(
-                details,
-                "presolve_all_rows_and_columns_eliminated",
-            ),
-        },
+        "after_presolve": after_presolve_json(details),
         "cplex_progress": {
             name: value
             for name, value in details.items()
