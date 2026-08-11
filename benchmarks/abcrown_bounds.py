@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import contextlib
-from dataclasses import dataclass, field
-import hashlib
+from dataclasses import dataclass
 import io
-import json
 import sys
 
 import torch
@@ -17,11 +15,6 @@ from nn_equivalence.nn_types import Bounds, NeuralNetwork
 class ABCrownBoundOptions:
     timeout_sec: float
     method: str = "CROWN-Optimized"
-
-
-@dataclass
-class ABCrownBoundCache:
-    values: dict[str, list[Bounds]] = field(default_factory=dict)
 
 
 class PrefixPreActivationNetwork(nn.Module):
@@ -46,23 +39,6 @@ class PrefixPreActivationNetwork(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
-
-
-def network_bounds_key(
-    network: NeuralNetwork,
-    input_bounds: Bounds,
-    options: ABCrownBoundOptions,
-) -> str:
-    payload = json.dumps(
-        {
-            "network": network,
-            "input_bounds": input_bounds,
-            "timeout_sec": options.timeout_sec,
-            "method": options.method,
-        },
-        sort_keys=True,
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def affine_bounds(
@@ -149,12 +125,7 @@ def compute_network_bounds(
     network: NeuralNetwork,
     input_bounds: Bounds,
     options: ABCrownBoundOptions,
-    cache: ABCrownBoundCache | None = None,
 ) -> list[Bounds] | None:
-    key = network_bounds_key(network, input_bounds, options)
-    if cache is not None and key in cache.values:
-        return cache.values[key]
-
     bounds: list[Bounds] = []
     current_bounds = input_bounds
     for layer_index, (weights, bias) in enumerate(network):
@@ -181,6 +152,4 @@ def compute_network_bounds(
         if layer_index != len(network) - 1:
             current_bounds = relu_bounds(layer_bounds)
 
-    if cache is not None:
-        cache.values[key] = bounds
     return bounds

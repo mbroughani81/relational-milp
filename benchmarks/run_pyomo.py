@@ -15,7 +15,6 @@ from pyomo.repn import generate_standard_repn
 
 import nn_equivalence.encoder_pyomo as encoder
 from benchmarks.abcrown_bounds import (
-    ABCrownBoundCache,
     ABCrownBoundOptions,
     compute_network_bounds,
 )
@@ -522,7 +521,6 @@ def run_instance(
     instance: Instance,
     solver_name: SolverName,
     bound_tightening: BoundTighteningMode,
-    abcrown_bound_cache: ABCrownBoundCache | None,
     verbose: bool = False,
     debug: bool = False,
     fix_stable_relu_binaries: bool = True,
@@ -533,7 +531,6 @@ def run_instance(
     bound_result = compute_bounds(
         instance,
         bound_tightening,
-        abcrown_bound_cache,
     )
     bounds = bound_result.bounds
 
@@ -669,7 +666,6 @@ def compute_interval_bounds(
 def compute_bounds(
     instance: Instance,
     bound_tightening: BoundTighteningMode,
-    abcrown_bound_cache: ABCrownBoundCache | None,
 ) -> BoundResult:
     input_box = Hyperrectangle.overapproximate(instance.input_region)
     input_bounds: Bounds = input_box.bounds()
@@ -701,7 +697,6 @@ def compute_bounds(
         instance.nn1,
         input_bounds,
         options,
-        abcrown_bound_cache,
     )
     nn1_bounds = compute_interval_bounds(
         instance.nn1,
@@ -715,7 +710,6 @@ def compute_bounds(
         instance.nn2,
         input_bounds,
         options,
-        abcrown_bound_cache,
     )
     nn2_bounds = compute_interval_bounds(
         instance.nn2,
@@ -899,9 +893,6 @@ def main() -> None:
             limit,
             ids,
         )
-        abcrown_bound_cache = (
-            ABCrownBoundCache() if args.bound_tightening == "abcrown" else None
-        )
         results: list[InstanceResult] = []
         debug_payloads: list[dict[str, Any]] = []
         total_instances = len(instances)
@@ -910,7 +901,6 @@ def main() -> None:
                 instance,
                 args.solver,
                 args.bound_tightening,
-                abcrown_bound_cache,
                 args.verbose,
                 debug_enabled,
                 args.fix_stable_relu_binaries,

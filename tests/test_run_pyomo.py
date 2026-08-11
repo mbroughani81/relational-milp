@@ -5,12 +5,9 @@ import pytest
 pyo = pytest.importorskip("pyomo.environ")
 
 from benchmarks.common import (
-    HalfSpace,
     Hyperrectangle,
-    HPolytope,
     Instance,
 )
-from benchmarks.run_pyomo import run_instance
 from nn_equivalence.encoder_pyomo import (
     add_output_distance_constraint,
     validate_directional_witness,
@@ -65,34 +62,6 @@ def test_validate_directional_witness_warns_for_invalid_margin(capsys) -> None:
     assert "Solver returned a feasible point" in err
     assert "target_verified=False" in err
     assert "input_verified=True" in err
-
-
-def test_run_instance_respects_polyhedral_input_constraints() -> None:
-    instance = Instance(
-        instance_id="polyhedron_instance",
-        suite_name="test",
-        nn1=[([[1.0, 1.0]], [0.0])],
-        nn2=[([[0.0, 0.0]], [0.0])],
-        input_region=HPolytope(
-            [
-                HalfSpace([-1.0, 0.0], 0.0),
-                HalfSpace([1.0, 0.0], 1.0),
-                HalfSpace([0.0, -1.0], 0.0),
-                HalfSpace([0.0, 1.0], 1.0),
-                HalfSpace([1.0, 1.0], 1.0),
-            ]
-        ),
-        epsilon=1.5,
-    )
-
-    result = run_instance(
-        instance,
-        solver_name="highs",
-        bound_tightening="interval",
-        abcrown_bound_cache=None,
-    )
-
-    assert result.status == "unsat"
 
 
 def test_output_distance_constraint_uses_only_selected_output() -> None:

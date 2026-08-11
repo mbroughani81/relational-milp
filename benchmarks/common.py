@@ -45,24 +45,9 @@ class Hyperrectangle(AbstractPolytope):
             return set_
         raise TypeError(f"unsupported polytope type: {type(set_).__name__}")
 
-class HPolytope(AbstractPolytope):
-    def __init__(self, constraints: list[HalfSpace]) -> None:
-        if not all(isinstance(constraint, HalfSpace) for constraint in constraints):
-            raise ValueError("HPolytope constraints must be HalfSpace instances")
-        self.constraints = tuple(constraints)
-        dimensions = {len(constraint.a) for constraint in self.constraints}
-        if len(dimensions) != 1:
-            raise ValueError("HPolytope halfspaces must all have the same dimension")
-        self._dimension = dimensions.pop()
-
-
 def constraints_list(set_: AbstractPolytope | HalfSpace) -> tuple[HalfSpace, ...]:
     if isinstance(set_, HalfSpace):
         return (set_,)
-    if isinstance(set_, HPolytope):
-        for constraint in set_.constraints:
-            constraint.validate_dimension(set_._dimension)
-        return set_.constraints
     if isinstance(set_, Hyperrectangle):
         return ()
     raise TypeError(f"unsupported polytope type: {type(set_).__name__}")
@@ -73,8 +58,6 @@ def dim(set_: AbstractPolytope) -> int:
         return len(set_.a)
     if isinstance(set_, Hyperrectangle):
         return len(set_.low)
-    if isinstance(set_, HPolytope):
-        return set_._dimension
     raise TypeError(f"unsupported polytope type: {type(set_).__name__}")
 
 
