@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-from dataclasses import replace
 import hashlib
 import importlib
 import io
@@ -85,70 +84,6 @@ ABCROWN_PROFILES: dict[str, ConfigDict] = {
             },
         },
     },
-    # Strong-branching beta-CROWN: spend more work per ReLU split decision.
-    "relu-fsb": {
-        "solver": {
-            "bound_prop_method": "alpha-crown",
-        },
-        "bab": {
-            "branching": {
-                "method": "fsb",
-                "candidates": 10,
-                "reduceop": "min",
-            },
-        },
-    },
-    # Input-space BaB: split the shared input region instead of ReLU phases.
-    "input-split": {
-        "solver": {
-            "bound_prop_method": "alpha-crown",
-            "init_bound_prop_method": "alpha-crown",
-        },
-        "bab": {
-            "branching": {
-                "method": "sb",
-                "input_split": {
-                    "enable": True,
-                    "split_partitions": 2,
-                },
-            },
-        },
-    },
-    # MIP-refined beta-CROWN BaB: tighten intermediate bounds before BaB.
-    "mip-refined-bab": {
-        "general": {
-            "complete_verifier": "bab-refine",
-        },
-        "solver": {
-            "mip": {
-                "mip_solver": "gurobi",
-                "parallel_solvers": 8,
-                "solver_threads": 1,
-                "refine_neuron_timeout": 15,
-                "refine_neuron_time_percentage": 0.5,
-            },
-        },
-        "bab": {
-            "branching": {
-                "method": "kfsb",
-                "candidates": 3,
-            },
-        },
-    },
-    # Direct complete MIP: delegate the exact piecewise-linear search to Gurobi.
-    "direct-mip": {
-        "general": {
-            "complete_verifier": "mip",
-        },
-        "solver": {
-            "mip": {
-                "mip_solver": "gurobi",
-                "formulation": "mip",
-                "parallel_solvers": 1,
-                "solver_threads": 8,
-            },
-        },
-    },
 }
 
 
@@ -213,28 +148,11 @@ def load_suite(name: str, suite_options: SuiteOptions) -> InstanceSuite:
     return module.load_suite(suite_options)
 
 
-def apply_timeout_override(
-    suite: InstanceSuite,
-    timeout_sec: float | None,
-) -> InstanceSuite:
-    if timeout_sec is None:
-        return suite
-    if timeout_sec <= 0:
-        raise ValueError("--timeout must be positive")
-    return replace(
-        suite,
-        instances=[
-            replace(instance, timeout_sec=timeout_sec)
-            for instance in suite.instances
-        ],
-    )
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run an NN equivalence instance suite with alpha-beta-CROWN."
     )
-    parser.add_argument("--suite", default="sample")
+    parser.add_argument("--suite", default="mnist_reludiff")
     parser.add_argument(
         "--suite-options",
         action="append",
@@ -250,20 +168,6 @@ def parse_args() -> argparse.Namespace:
         default="relu-kfsb",
         choices=sorted(ABCROWN_PROFILES),
         help="Named alpha-beta-CROWN configuration profile.",
-    )
-    parser.add_argument(
-        "--list-profiles",
-        action="store_true",
-        help="List available alpha-beta-CROWN profiles and exit.",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        default=None,
-        help=(
-            "Override every instance.timeout_sec before running CROWN. "
-            "Without this, each suite instance controls its own bab.timeout."
-        ),
     )
     parser.add_argument(
         "--verbose",
@@ -734,19 +638,11 @@ def build_results(
 
 def main() -> None:
     args = parse_args()
-    if args.list_profiles:
-        for profile in sorted(ABCROWN_PROFILES):
-            print(profile)
-        return
-
     try:
         suite_options, limit, ids = extract_selection_from_suite_options(
             parse_suite_options(args.suite_options),
         )
-        suite = apply_timeout_override(
-            load_suite(args.suite, suite_options),
-            args.timeout,
-        )
+        suite = load_suite(args.suite, suite_options)
         instances = filter_instances(
             suite.instances,
             limit,

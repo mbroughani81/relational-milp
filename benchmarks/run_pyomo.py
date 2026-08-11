@@ -33,7 +33,7 @@ from benchmarks.common import (
 from nn_equivalence.nn_types import Bounds, NeuralNetwork
 
 BoundTighteningMode = Literal["interval", "abcrown"]
-SolverName = Literal["highs", "gurobi", "cplex"]
+SolverName = Literal["cplex"]
 
 
 @dataclass(frozen=True)
@@ -155,11 +155,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run an NN equivalence instance suite with Pyomo."
     )
-    parser.add_argument("--suite", default="sample")
+    parser.add_argument("--suite", default="mnist_reludiff")
     parser.add_argument(
         "--solver",
-        default="highs",
-        choices=("highs", "gurobi", "cplex"),
+        default="cplex",
+        choices=("cplex",),
     )
     parser.add_argument(
         "--suite-options",
@@ -220,31 +220,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def pyomo_solver_name(solver_name: SolverName) -> str:
-    if solver_name == "cplex":
-        return "cplex_direct"
-    return solver_name
-
-
-def set_solver_timeout(
-    solver: Any, solver_name: SolverName, timeout_sec: float
-) -> None:
-    if hasattr(solver, "options"):
-        if solver_name == "gurobi":
-            solver.options["TimeLimit"] = timeout_sec
-        elif solver_name == "cplex":
-            solver.options["timelimit"] = timeout_sec
-        else:
-            solver.options["time_limit"] = timeout_sec
-    elif hasattr(solver, "config") and hasattr(solver.config, "time_limit"):
-        solver.config.time_limit = timeout_sec
-
-
 def create_solver(
     solver_name: SolverName,
     timeout_sec: float,
 ) -> Any:
-    backend_name = pyomo_solver_name(solver_name)
+    backend_name = "cplex_direct"
     solver = pyo.SolverFactory(backend_name)
     if not solver.available(False):
         raise RuntimeError(
@@ -253,7 +233,7 @@ def create_solver(
             "available to Pyomo."
         )
 
-    set_solver_timeout(solver, solver_name, timeout_sec)
+    solver.options["timelimit"] = timeout_sec
     return solver
 
 
