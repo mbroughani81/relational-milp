@@ -11,7 +11,6 @@ import time
 import traceback
 from pathlib import Path
 from typing import Callable
-from typing import TextIO
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -28,7 +27,9 @@ from benchmarks.common import (
     InstanceSuite,
     SuiteOptions,
     constraints_list,
+    format_expected,
     parse_suite_options,
+    print_progress,
     validate_instance,
 )
 from nn_equivalence.nn_types import NeuralNetwork
@@ -478,13 +479,6 @@ def instance_status_from_abcrown(status: str | None) -> InstanceStatus:
     return "unknown"
 
 
-def format_expected(result: InstanceResult) -> str:
-    if result.expected_status is None:
-        return ""
-    matched = "yes" if result.matched_expected else "no"
-    return f"{result.expected_status}:{matched}"
-
-
 def results_csv(results: list[InstanceResult], abcrown_statuses: list[str]) -> str:
     lines = ["instance_id,status,abcrown_status,expected,runtime_sec,epsilon"]
     for result, abcrown_status in zip(results, abcrown_statuses):
@@ -560,32 +554,6 @@ def extract_selection_from_suite_options(
     return options, None, []
 
 
-def print_progress(
-    index: int,
-    total: int,
-    instance: Instance,
-    abcrown_status: str,
-    runtime_sec: float,
-    stream: TextIO,
-) -> None:
-    result = InstanceResult(
-        instance_id=instance.instance_id,
-        suite_name=instance.suite_name,
-        status=instance_status_from_abcrown(abcrown_status),
-        runtime_sec=runtime_sec,
-        epsilon=instance.epsilon,
-        expected_status=instance.expected_status,
-    )
-    print(
-        f"[{index}/{total}] {result.instance_id}: "
-        f"status={result.status} abcrown_status={abcrown_status} "
-        f"expected={format_expected(result) or '-'} "
-        f"runtime_sec={result.runtime_sec:.3f} epsilon={result.epsilon:.17g}",
-        file=stream,
-        flush=True,
-    )
-
-
 def prepare_artifacts(
     suite: InstanceSuite,
     profile: str,
@@ -652,8 +620,6 @@ def main() -> None:
             InstanceSuite(name=suite.name, instances=instances),
             args.profile,
         )
-        progress_stream = sys.stdout
-
         def progress_callback(
             index: int,
             total: int,
@@ -661,13 +627,19 @@ def main() -> None:
             abcrown_status: str,
             runtime_sec: float,
         ) -> None:
+            result = InstanceResult(
+                instance_id=instance.instance_id,
+                suite_name=instance.suite_name,
+                status=instance_status_from_abcrown(abcrown_status),
+                runtime_sec=runtime_sec,
+                epsilon=instance.epsilon,
+                expected_status=instance.expected_status,
+            )
             print_progress(
                 index,
                 total,
-                instance,
-                abcrown_status,
-                runtime_sec,
-                progress_stream,
+                result,
+                extra_fields={"abcrown_status": abcrown_status},
             )
 
         returncode, output, abcrown_result_by_index = run_abcrown(

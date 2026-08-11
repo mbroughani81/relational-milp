@@ -27,7 +27,9 @@ from benchmarks.common import (
     InstanceSuite,
     SolveStats,
     SuiteOptions,
+    format_expected,
     parse_suite_options,
+    print_progress,
     validate_instance,
 )
 from nn_equivalence.nn_types import Bounds, NeuralNetwork
@@ -67,13 +69,6 @@ class CplexDebugStats:
 def load_suite(name: str, suite_options: SuiteOptions) -> InstanceSuite:
     module = importlib.import_module(f"benchmarks.{name}")
     return module.load_suite(suite_options)
-
-
-def format_expected(result: InstanceResult) -> str:
-    if result.expected_status is None:
-        return ""
-    matched = "yes" if result.matched_expected else "no"
-    return f"{result.expected_status}:{matched}"
 
 
 def results_csv(results: list[InstanceResult]) -> str:
@@ -717,18 +712,6 @@ def timing_total(stats: list[SolveStats], phase_name: str) -> float:
     )
 
 
-def format_solve_stats(stats: list[SolveStats]) -> str:
-    parts = []
-    for solve_stats in stats:
-        timing_text = ",".join(
-            f"{phase}={runtime_sec:.3f}" for phase, runtime_sec in solve_stats.timings
-        )
-        parts.append(f"{solve_stats.name}[{timing_text}]")
-    measured_total_sec = sum(solve_stats.measured_total_sec for solve_stats in stats)
-    parts.append(f"total={measured_total_sec:.3f}")
-    return " ".join(parts)
-
-
 def detail_value(
     details: dict[str, str | int | float],
     key: str,
@@ -840,26 +823,6 @@ def instance_debug_json(result: InstanceResult) -> dict[str, Any]:
     }
 
 
-def print_progress(
-    index: int,
-    total: int,
-    result: InstanceResult,
-    debug_payload: dict[str, Any] | None,
-) -> None:
-    phase_text = ""
-    if result.stats:
-        phase_text = f" phases: {format_solve_stats(result.stats)}"
-    print(
-        f"[{index}/{total}] {result.instance_id}: "
-        f"status={result.status} expected={format_expected(result) or '-'} "
-        f"runtime_sec={result.runtime_sec:.3f} epsilon={result.epsilon:.17g}"
-        f"{phase_text}",
-        flush=True,
-    )
-    if debug_payload is not None:
-        print(json.dumps(debug_payload, indent=2), flush=True)
-
-
 def main() -> None:
     args = parse_args()
     try:
@@ -889,12 +852,9 @@ def main() -> None:
             debug_payload = instance_debug_json(result) if debug_enabled else None
             if args.debug_out is not None and debug_payload is not None:
                 debug_payloads.append(debug_payload)
-            print_progress(
-                index,
-                total_instances,
-                result,
-                debug_payload if args.debug else None,
-            )
+            print_progress(index, total_instances, result)
+            if args.debug and debug_payload is not None:
+                print(json.dumps(debug_payload, indent=2), flush=True)
     except (RuntimeError, ValueError) as error:
         print(error)
         raise SystemExit(2) from error
