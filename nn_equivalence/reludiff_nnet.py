@@ -145,6 +145,32 @@ def quantize_network_float16(network: NeuralNetwork) -> NeuralNetwork:
     return quantized
 
 
+def prune_network_unstructured(network: NeuralNetwork, sparsity: float) -> NeuralNetwork:
+    """Zero exactly floor(sparsity * total_weights) smallest-magnitude weights.
+
+    Pruning is global (a single magnitude ranking across every layer) and touches
+    weights only; biases are left intact. Ties are broken by weight position so the
+    result is deterministic. The architecture is preserved exactly.
+    """
+    if not 0.0 <= sparsity < 1.0:
+        raise ValueError("sparsity must be in [0.0, 1.0)")
+
+    pruned: list[LinearLayer] = [
+        ([row[:] for row in weights], bias[:]) for weights, bias in network
+    ]
+
+    ranked = sorted(
+        (abs(value), layer_index, out_index, in_index)
+        for layer_index, (weights, _) in enumerate(pruned)
+        for out_index, row in enumerate(weights)
+        for in_index, value in enumerate(row)
+    )
+    prune_count = int(sparsity * len(ranked))
+    for _, layer_index, out_index, in_index in ranked[:prune_count]:
+        pruned[layer_index][0][out_index][in_index] = 0.0
+    return pruned
+
+
 def _extract_initializer(text: str, name: str) -> str:
     marker = re.search(rf"\b{name}\b[^=]*=", text)
     if marker is None:

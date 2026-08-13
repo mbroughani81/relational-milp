@@ -14,6 +14,7 @@ from nn_equivalence.reludiff_nnet import (
     MNIST_RELUDIFF_NETWORKS,
     load_nnet_layers,
     load_reludiff_mnist_tests,
+    prune_network_unstructured,
     quantize_network_float16,
     validate_mnist_reludiff_network,
 )
@@ -23,6 +24,8 @@ DEFAULT_SUITE_OPTIONS: SuiteOptions = {
     "epsilon": "1.0",
     "perturb": "3.0",
     "timeout": "5",
+    "perturbation": "quantize",
+    "sparsity": "0.5",
 }
 
 
@@ -32,7 +35,16 @@ def _normalized_options(suite_options: SuiteOptions | None) -> SuiteOptions:
         normalized_key = key.strip().lower().replace("-", "_")
         options[normalized_key] = value
 
-    allowed_options = {"networks", "modes", "limit", "timeout", "epsilon", "perturb"}
+    allowed_options = {
+        "networks",
+        "modes",
+        "limit",
+        "timeout",
+        "epsilon",
+        "perturb",
+        "perturbation",
+        "sparsity",
+    }
     unknown_options = set(options) - allowed_options
     if unknown_options:
         raise ValueError(
@@ -70,6 +82,23 @@ def _perturb(options: SuiteOptions) -> float:
     return float(options["perturb"])
 
 
+def _perturbation(options: SuiteOptions) -> str:
+    value = options["perturbation"].strip().lower()
+    if value not in {"quantize", "prune"}:
+        raise ValueError(
+            "mnist_reludiff perturbation must be 'quantize' or 'prune', "
+            f"got {options['perturbation']!r}"
+        )
+    return value
+
+
+def _sparsity(options: SuiteOptions) -> float:
+    sparsity = float(options["sparsity"])
+    if not 0.0 <= sparsity < 1.0:
+        raise ValueError("mnist_reludiff sparsity must be in [0.0, 1.0)")
+    return sparsity
+
+
 def _validate_network_names(network_names: tuple[str, ...]) -> None:
     for network_name in network_names:
         if network_name not in MNIST_RELUDIFF_NETWORKS:
@@ -92,9 +121,21 @@ def _three_pixel_region(raw_pixels: list[float], pixel_ids: list[int]) -> Abstra
     return Hyperrectangle(low=lower_bounds, high=upper_bounds)
 
 
+def _make_second_network(
+    original: NeuralNetwork,
+    perturbation: str,
+    sparsity: float,
+) -> NeuralNetwork:
+    if perturbation == "prune":
+        return prune_network_unstructured(original, sparsity)
+    return quantize_network_float16(original)
+
+
 def _load_network_pairs(
     data_dir: Path,
     network_names: tuple[str, ...],
+    perturbation: str,
+    sparsity: float,
 ) -> dict[str, tuple[NeuralNetwork, NeuralNetwork]]:
     pairs: dict[str, tuple[NeuralNetwork, NeuralNetwork]] = {}
     for network_name in network_names:
@@ -105,7 +146,8 @@ def _load_network_pairs(
             original,
             source_path=network_path,
         )
-        pairs[network_name] = (original, quantize_network_float16(original))
+        second = _make_second_network(original, perturbation, sparsity)
+        pairs[network_name] = (original, second)
     return pairs
 
 
@@ -144,10 +186,22 @@ def load_suite(suite_options: SuiteOptions | None = None) -> InstanceSuite:
     timeout_sec = _timeout(options)
     epsilon = _epsilon(options)
     perturb = _perturb(options)
-    network_pairs = _load_network_pairs(data_dir, network_names)
+    perturbation = _perturbation(options)
+    sparsity = _sparsity(options)
+    network_pairs = _load_network_pairs(
+        data_dir, network_names, perturbation, sparsity
+    )
+
+    if perturbation == "prune":
+        transform_metadata = {"perturbation": "prune", "sparsity": sparsity}
+    else:
+        transform_metadata = {
+            "perturbation": "quantize",
+            "quantization": "float32_to_float16",
+        }
 
     instances: list[Instance] = []
-    for network_name, (original, quantized) in network_pairs.items():
+    for network_name, (original, second) in network_pairs.items():
         for mode in modes:
             for sample_index in sample_indices:
                 raw_pixels = mnist_tests[sample_index]
@@ -167,7 +221,7 @@ def load_suite(suite_options: SuiteOptions | None = None) -> InstanceSuite:
                         instance_id=f"{network_name}_{mode}_{sample_index}",
                         suite_name=suite_name,
                         nn1=original,
-                        nn2=quantized,
+                        nn2=second,
                         input_region=input_region,
                         epsilon=epsilon,
                         output_index=labels[sample_index],
@@ -180,7 +234,7 @@ def load_suite(suite_options: SuiteOptions | None = None) -> InstanceSuite:
                             "output_index": labels[sample_index],
                             "input_mode": mode,
                             "perturb": perturb_metadata,
-                            "quantization": "float32_to_float16",
+                            **transform_metadata,
                         },
                     )
                 )
