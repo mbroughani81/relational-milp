@@ -130,6 +130,46 @@ def load_nnet_layers(path: Path) -> NeuralNetwork:
     return layers
 
 
+def _format_nnet_value(value: float) -> str:
+    """Shortest round-trippable decimal; atof-compatible for the C .nnet reader."""
+    return repr(float(value))
+
+
+def write_nnet_layers(
+    source_path: Path,
+    network: NeuralNetwork,
+    output_path: Path,
+) -> None:
+    """Write ``network`` as a .nnet file the ReluDiff/NeuroDiff C tools can load.
+
+    The 7-line NNet header (format row, layer sizes, symmetric flag, and the
+    mins/maxes/means/ranges normalization block) is copied verbatim from
+    ``source_path``. Only the weight and bias section is rewritten, so the result
+    keeps ``source_path``'s architecture and input normalization while carrying
+    ``network``'s (e.g. pruned or quantized) parameters. The architecture of
+    ``network`` must match the source header.
+    """
+    header_lines: list[str] = []
+    with source_path.open("r", encoding="utf-8") as file:
+        for _ in range(7):
+            header_lines.append(_next_data_line(file).rstrip())
+
+    header_architecture = [int(value) for value in _csv_values(header_lines[1])]
+    if network_architecture(network) != header_architecture:
+        raise ValueError(
+            f"network architecture {network_architecture(network)} does not match "
+            f"the .nnet header architecture {header_architecture} in {source_path}"
+        )
+
+    lines = [line + "\n" for line in header_lines]
+    for weights, bias in network:
+        for row in weights:
+            lines.append(",".join(_format_nnet_value(value) for value in row) + ",\n")
+        for value in bias:
+            lines.append(_format_nnet_value(value) + ",\n")
+    output_path.write_text("".join(lines), encoding="utf-8")
+
+
 def quantize_network_float16(network: NeuralNetwork) -> NeuralNetwork:
     def quantize(value: float) -> float:
         return float(struct.unpack("e", struct.pack("e", float(value)))[0])

@@ -98,6 +98,31 @@ python3 -m benchmarks.run_pyomo \
   --suite-options timeout=10
 ```
 
+Run ReluDiff / NeuroDiff (the `delta_network_test` C verifiers) on the same
+`mnist_reludiff` instances as the MILP and CROWN runners:
+
+```bash
+python3 -m benchmarks.run_diffverifier \
+  --tool neurodiff \
+  --binary /path/to/delta_network_test \
+  --suite-options networks=mnist_relu_3_100 \
+  --suite-options modes=global \
+  --suite-options perturbation=prune \
+  --suite-options sparsity=0.3 \
+  --suite-options limit=100 \
+  --suite-options timeout=60
+```
+
+The binary is the `delta_network_test` executable compiled from the NeuroDiff
+ASE-2020 artifact; the same interface yields pure ReluDiff or full NeuroDiff
+depending on the build flags (`--tool` only labels the output). The runner
+serializes each pair's second network to a temporary `.nnet` (reusing the base
+network's normalization header), maps `global`/`three_pixel` onto the ASE tool's
+`-p`/`-x 3` flags and `sample_index` onto property ids `400-499`, parses
+`No adv!` (verified -> `unsat`) / `adv found` (counterexample -> `sat`), and
+emits the same CSV columns as the CROWN runner plus `num_splits` and
+`tool_time_sec`. Pass `--binary` or set `DIFFVERIFIER_BINARY`.
+
 Redirect stdout to save benchmark results:
 
 ```bash

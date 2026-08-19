@@ -2,12 +2,14 @@ data/
 models/
 plan.md
 artifacts/
+third_party/
 zip_git_visible.py
 *.zip
 *.txt
 *.json
 .idea/
 *.patch
+*.out
 
 # Python bytecode and caches
 __pycache__/
