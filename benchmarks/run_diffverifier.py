@@ -49,7 +49,11 @@ ARTIFACT_ROOT = Path("artifacts/diffverifier")
 DEFAULT_DATA_DIR = Path("data/reludiff_mnist")
 MNIST_PROPERTY_BASE = 400
 # The mnist_reludiff three_pixel mode opens exactly the first three random_pixels
-# (see _three_pixel_region), matching the tool's `-x 3` pixel experiment.
+# (see _three_pixel_region), matching the tool's `-x 3` pixel experiment. This
+# only holds while data/reludiff_mnist/mnist_tests.h carries the same
+# random_pixels table as the compiled ASE-2020 artifact; the ReluDiff ICSE
+# table differs and silently makes the verifier families check different
+# regions.
 THREE_PIXEL_COUNT = 3
 SUPPORTED_SUITE = "mnist_reludiff"
 
