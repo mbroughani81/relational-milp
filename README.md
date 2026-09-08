@@ -165,19 +165,42 @@ python3 -m benchmarks.run_pyomo \
 
 ## Current benchmark suites
 
-- `sample`: three tiny 2-input instances. Includes slightly different networks
-  at two epsilon values and an identical-network case. This is the fastest
-  correctness smoke test.
-- `mnist_reludiff`: compares the original ReluDiff `.nnet` MNIST models with
-  their float16 quantized versions. For image label `c`, each instance verifies
-  `|nn1(x)[c] - nn2(x)[c]| <= epsilon`; it does not take a maximum over all ten
-  outputs. This matches the artifact's per-image target-output setup. It supports
-  `networks`, `modes`, `limit`, `timeout`, `epsilon`, and `perturb` suite options.
-- `synthetic`: deterministic random 2D ReLU networks with architecture
-  `2-10-10-2`; compares a base network with a noisy perturbation at several
-  epsilon values.
-- `bigger_synthetic`: a larger deterministic synthetic suite with architecture
-  `2-1000-1000-1000-2`. This is intended for stress testing and may be slow or
-  memory intensive.
-- `mnist`: compares trained MNIST model pairs from `models/nn_equivalence/` on
-  small input boxes around MNIST test samples from `data/MNIST/`.
+- `mnist_reludiff`: compares the original ReluDiff `.nnet` MNIST models with a
+  float16-quantized or magnitude-pruned copy of the *same* architecture. For
+  image label `c`, each instance verifies `|nn1(x)[c] - nn2(x)[c]| <= epsilon`.
+  Supports `networks`, `modes`, `limit`, `timeout`, `epsilon`, `perturb`,
+  `perturbation`, and `sparsity` suite options.
+- `distillation`: teacher/student pairs trained with Hinton-style knowledge
+  distillation (different architectures, similar behavior). Property A is
+  numerical output (logit) equivalence on the labeled class:
+  `|z_T(x)[c] - z_S(x)[c]| <= epsilon`. Uses the same ReluDiff 100-image /
+  3-pixel fixtures as `mnist_reludiff`. Supports `pairs`, `modes`, `limit`,
+  `timeout`, `epsilon`, and `perturb`.
+
+Train the baseline KD-1 pair (teacher `784-64-32-10`, student `784-32-16-10`,
+`T=2`, `α=0.5`):
+
+```bash
+python3 -m training.distill_mnist --pair-id kd_1 --force
+```
+
+Then run verification (epsilon should be chosen from the printed / metadata
+logit-gap statistics, not blindly copied from quantization):
+
+```bash
+python3 -m benchmarks.run_pyomo \
+  --suite distillation \
+  --solver cplex \
+  --suite-options pairs=kd_1 \
+  --suite-options modes=three_pixel \
+  --suite-options epsilon=0.1 \
+  --suite-options limit=100 \
+  --suite-options timeout=30
+```
+
+Presets `kd_1`, `kd_2` (same arch, `T=4`), and `kd_3` (larger teacher) are
+defined in `training/distill_mnist.py`. Global regions are the same pair with
+`modes=global` (KD-4 in the experiment plan).
+
+Other historically documented suites (`sample`, `synthetic`, `bigger_synthetic`,
+`mnist`) may not be present in the current tree.

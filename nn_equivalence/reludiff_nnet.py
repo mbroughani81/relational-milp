@@ -135,6 +135,64 @@ def _format_nnet_value(value: float) -> str:
     return repr(float(value))
 
 
+def write_nnet_from_scratch(
+    network: NeuralNetwork,
+    output_path: Path,
+    *,
+    input_mins: list[float] | None = None,
+    input_maxes: list[float] | None = None,
+    input_means: list[float] | None = None,
+    input_ranges: list[float] | None = None,
+) -> None:
+    """Write a ReluDiff-style ``.nnet`` file for an arbitrary feedforward ReLU net.
+
+    Normalization defaults to identity on ``[0, 1]`` inputs (means ``0``, ranges
+    ``1``), which matches how MNIST pixels are scaled in this repository's
+    verification regions. The means/ranges rows include the trailing output
+    entry used by the ReluDiff header convention.
+    """
+    architecture = network_architecture(network)
+    input_size = architecture[0]
+    output_size = architecture[-1]
+    num_layers = len(architecture) - 1
+    max_layer_size = max(architecture)
+
+    if input_mins is None:
+        input_mins = [0.0] * input_size
+    if input_maxes is None:
+        input_maxes = [1.0] * input_size
+    if input_means is None:
+        input_means = [0.0] * (input_size + 1)
+    if input_ranges is None:
+        input_ranges = [1.0] * (input_size + 1)
+
+    if len(input_mins) != input_size or len(input_maxes) != input_size:
+        raise ValueError("input mins/maxes must match the network input size")
+    if len(input_means) != input_size + 1 or len(input_ranges) != input_size + 1:
+        raise ValueError("input means/ranges must have length input_size + 1")
+
+    def csv_row(values: list[float] | list[int]) -> str:
+        return ",".join(_format_nnet_value(float(value)) for value in values) + ",\n"
+
+    lines = [
+        f"{num_layers},{input_size},{output_size},{max_layer_size},\n",
+        ",".join(str(size) for size in architecture) + ",\n",
+        "0,\n",
+        csv_row(input_mins),
+        csv_row(input_maxes),
+        csv_row(input_means),
+        csv_row(input_ranges),
+    ]
+    for weights, bias in network:
+        for row in weights:
+            lines.append(",".join(_format_nnet_value(value) for value in row) + ",\n")
+        for value in bias:
+            lines.append(_format_nnet_value(value) + ",\n")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("".join(lines), encoding="utf-8")
+
+
 def write_nnet_layers(
     source_path: Path,
     network: NeuralNetwork,

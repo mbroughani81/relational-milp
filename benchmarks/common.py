@@ -211,25 +211,31 @@ def parse_suite_options(raw_options: list[str] | None) -> SuiteOptions:
 def validate_instance(instance: Instance) -> None:
     if instance.epsilon < 0:
         raise ValueError("epsilon must be non-negative")
-    if len(instance.nn1) != len(instance.nn2):
-        raise ValueError("nn1 and nn2 must have the same number of layers")
+    if not instance.nn1 or not instance.nn2:
+        raise ValueError("nn1 and nn2 must each have at least one layer")
+
     input_dimension = dim(instance.input_region)
     constraints_list(instance.input_region)
     Hyperrectangle.overapproximate(instance.input_region)
-    if len(instance.nn1[0][0][0]) != input_dimension:
-        raise ValueError("input region dimension does not match network input size")
 
-    for layer_index, ((weights1, bias1), (weights2, bias2)) in enumerate(
-        zip(instance.nn1, instance.nn2), start=1
-    ):
-        if len(weights1) != len(weights2) or len(bias1) != len(bias2):
-            raise ValueError(f"layer {layer_index} output sizes differ")
-        if len(weights1[0]) != len(weights2[0]):
-            raise ValueError(f"layer {layer_index} input sizes differ")
+    nn1_input_size = len(instance.nn1[0][0][0])
+    nn2_input_size = len(instance.nn2[0][0][0])
+    if nn1_input_size != input_dimension:
+        raise ValueError("input region dimension does not match nn1 input size")
+    if nn2_input_size != input_dimension:
+        raise ValueError("input region dimension does not match nn2 input size")
 
-    output_size = len(instance.nn1[-1][1])
-    if instance.output_index < 0 or instance.output_index >= output_size:
+    # Teacher/student pairs (e.g. knowledge distillation) may have different
+    # hidden widths and depths. Only the shared input/output interface is required.
+    nn1_output_size = len(instance.nn1[-1][1])
+    nn2_output_size = len(instance.nn2[-1][1])
+    if nn1_output_size != nn2_output_size:
+        raise ValueError(
+            "nn1 and nn2 must have the same output size: "
+            f"nn1={nn1_output_size}, nn2={nn2_output_size}"
+        )
+    if instance.output_index < 0 or instance.output_index >= nn1_output_size:
         raise ValueError(
             "output_index is outside the network output range: "
-            f"index={instance.output_index}, output_size={output_size}"
+            f"index={instance.output_index}, output_size={nn1_output_size}"
         )
