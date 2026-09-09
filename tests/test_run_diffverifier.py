@@ -125,3 +125,62 @@ def test_write_nnet_layers_rejects_architecture_mismatch(tmp_path):
     wrong_shape = [([[1.0, 2.0, 3.0]], [0.0])]
     with pytest.raises(ValueError):
         write_nnet_layers(source, wrong_shape, tmp_path / "bad.nnet")
+
+
+def test_distillation_nnet_paths_rejects_tier_b(tmp_path):
+    from benchmarks.run_diffverifier import _distillation_nnet_paths
+
+    teacher = [([[1.0, 0.0], [0.0, 1.0]], [0.0, 0.0]), ([[1.0, 0.0]], [0.0])]
+    student = [([[1.0, 0.0]], [0.0]), ([[1.0]], [0.0])]
+    instance = Instance(
+        instance_id="kd_1_three_pixel_0",
+        suite_name="distillation",
+        nn1=teacher,
+        nn2=student,
+        input_region=Hyperrectangle(low=[0.0, 0.0], high=[1.0, 1.0]),
+        epsilon=1.0,
+        metadata={
+            "pair_id": "kd_1",
+            "tier": "B",
+            "same_architecture": 0,
+            "sample_index": 0,
+        },
+    )
+    with pytest.raises(ValueError, match="Tier B"):
+        _distillation_nnet_paths(instance, tmp_path, {})
+
+
+def test_distillation_nnet_paths_writes_same_arch_student(tmp_path):
+    from benchmarks.run_diffverifier import _distillation_nnet_paths
+    from nn_equivalence.reludiff_nnet import write_nnet_from_scratch
+
+    teacher = [
+        ([[0.1, 0.2], [0.3, 0.4]], [0.0, 0.0]),
+        ([[0.5, 0.6]], [0.1]),
+    ]
+    student = [
+        ([[0.9, 0.8], [0.7, 0.6]], [0.2, 0.3]),
+        ([[0.4, 0.3]], [0.5]),
+    ]
+    teacher_path = tmp_path / "teacher.nnet"
+    write_nnet_from_scratch(teacher, teacher_path)
+    instance = Instance(
+        instance_id="kd_a1_three_pixel_0",
+        suite_name="distillation",
+        nn1=teacher,
+        nn2=student,
+        input_region=Hyperrectangle(low=[0.0, 0.0], high=[1.0, 1.0]),
+        epsilon=1.0,
+        metadata={
+            "pair_id": "kd_a1",
+            "tier": "A",
+            "same_architecture": 1,
+            "nnet1_path": str(teacher_path),
+            "sample_index": 0,
+        },
+    )
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    nnet1, nnet2 = _distillation_nnet_paths(instance, work_dir, {})
+    assert nnet1 == teacher_path
+    assert load_nnet_layers(nnet2) == student

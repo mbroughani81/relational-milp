@@ -170,37 +170,68 @@ python3 -m benchmarks.run_pyomo \
   image label `c`, each instance verifies `|nn1(x)[c] - nn2(x)[c]| <= epsilon`.
   Supports `networks`, `modes`, `limit`, `timeout`, `epsilon`, `perturb`,
   `perturbation`, and `sparsity` suite options.
-- `distillation`: teacher/student pairs trained with Hinton-style knowledge
-  distillation (different architectures, similar behavior). Property A is
-  numerical output (logit) equivalence on the labeled class:
+- `distillation`: Hinton-style knowledge-distillation teacher/student pairs.
+  Property A is numerical logit equivalence on the labeled class:
   `|z_T(x)[c] - z_S(x)[c]| <= epsilon`. Uses the same ReluDiff 100-image /
-  3-pixel fixtures as `mnist_reludiff`. Supports `pairs`, `modes`, `limit`,
-  `timeout`, `epsilon`, and `perturb`.
+  3-pixel fixtures as `mnist_reludiff`. Supports `pairs`, `tiers`, `modes`,
+  `limit`, `timeout`, `epsilon`, and `perturb`.
 
-Train the baseline KD-1 pair (teacher `784-64-32-10`, student `784-32-16-10`,
-`T=2`, `α=0.5`):
+  Two experimental tiers:
+
+  - **Tier A (same architecture)** — `kd_a1` (`784-64-32-10`→same), `kd_a2`
+    (`784-128-64-10`→same). Fair head-to-head with ReluDiff / NeuroDiff.
+  - **Tier B (different architecture)** — `kd_1` / `kd_2` / `kd_3`. Stress test
+    for architecture-flexible verifiers (Relational-MILP, ab-CROWN); ReluDiff /
+    NeuroDiff are N/A.
+
+Train pairs:
 
 ```bash
+# Tier A (ReluDiff/NeuroDiff comparable)
+python3 -m training.distill_mnist --pair-id kd_a1 --force
+python3 -m training.distill_mnist --pair-id kd_a2 --force
+
+# Tier B (diff-arch; MILP/CROWN only)
 python3 -m training.distill_mnist --pair-id kd_1 --force
 ```
 
-Then run verification (epsilon should be chosen from the printed / metadata
-logit-gap statistics, not blindly copied from quantization):
+Run Relational-MILP (epsilon from each pair's `metadata.json` logit-gap stats):
 
 ```bash
+# Tier A fair comparison
+python3 -m benchmarks.run_pyomo \
+  --suite distillation \
+  --solver cplex \
+  --suite-options tiers=A \
+  --suite-options modes=three_pixel \
+  --suite-options epsilon=2.0 \
+  --suite-options limit=100 \
+  --suite-options timeout=30
+
+# Tier B capability stress
 python3 -m benchmarks.run_pyomo \
   --suite distillation \
   --solver cplex \
   --suite-options pairs=kd_1 \
   --suite-options modes=three_pixel \
-  --suite-options epsilon=0.1 \
+  --suite-options epsilon=2.0 \
   --suite-options limit=100 \
   --suite-options timeout=30
 ```
 
-Presets `kd_1`, `kd_2` (same arch, `T=4`), and `kd_3` (larger teacher) are
-defined in `training/distill_mnist.py`. Global regions are the same pair with
-`modes=global` (KD-4 in the experiment plan).
+Run ReluDiff / NeuroDiff on Tier A only:
+
+```bash
+python3 -m benchmarks.run_diffverifier \
+  --suite distillation \
+  --tool neurodiff \
+  --binary /path/to/delta_network_test \
+  --suite-options pairs=kd_a1 \
+  --suite-options modes=three_pixel \
+  --suite-options epsilon=2.0 \
+  --suite-options limit=100 \
+  --suite-options timeout=30
+```
 
 Other historically documented suites (`sample`, `synthetic`, `bigger_synthetic`,
 `mnist`) may not be present in the current tree.

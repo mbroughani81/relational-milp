@@ -43,7 +43,7 @@ from benchmarks.common import (
     print_progress,
     validate_instance,
 )
-from nn_equivalence.reludiff_nnet import write_nnet_layers
+from nn_equivalence.reludiff_nnet import network_architecture, write_nnet_layers
 
 ARTIFACT_ROOT = Path("artifacts/diffverifier")
 DEFAULT_DATA_DIR = Path("data/reludiff_mnist")
@@ -55,7 +55,8 @@ MNIST_PROPERTY_BASE = 400
 # table differs and silently makes the verifier families check different
 # regions.
 THREE_PIXEL_COUNT = 3
-SUPPORTED_SUITE = "mnist_reludiff"
+SUPPORTED_SUITES = frozenset({"mnist_reludiff", "distillation"})
+DEFAULT_SUITE = "mnist_reludiff"
 
 
 def build_command(
@@ -164,10 +165,14 @@ def nnet2_path_for(
 ) -> tuple[Path, Path]:
     """Return (nnet1_source_path, nnet2_serialized_path) for an instance.
 
-    The perturbed second network depends only on the base network within a run
-    (the transform/sparsity is fixed), so it is serialized once per network and
-    reused across every image/mode.
+    ReluDiff/NeuroDiff require identical architectures. For ``mnist_reludiff``
+    the second network is a same-arch transform of the base ``.nnet``. For
+    Tier A ``distillation`` pairs the teacher ``.nnet`` is the header source and
+    the student weights are rewritten into a sibling temp file.
     """
+    if instance.suite_name == "distillation":
+        return _distillation_nnet_paths(instance, work_dir, cache)
+
     network = instance.metadata.get("network")
     if not isinstance(network, str):
         raise ValueError(
@@ -184,6 +189,48 @@ def nnet2_path_for(
         write_nnet_layers(nnet1_path, instance.nn2, nnet2_path)
         cache[network] = nnet2_path
     return nnet1_path, cache[network]
+
+
+def _distillation_nnet_paths(
+    instance: Instance,
+    work_dir: Path,
+    cache: dict[str, Path],
+) -> tuple[Path, Path]:
+    pair_id = instance.metadata.get("pair_id")
+    if not isinstance(pair_id, str):
+        raise ValueError(
+            f"instance {instance.instance_id} is missing a 'pair_id' metadata entry"
+        )
+
+    tier = instance.metadata.get("tier")
+    same_architecture = instance.metadata.get("same_architecture")
+    is_same_arch = (
+        same_architecture in {1, True}
+        or network_architecture(instance.nn1) == network_architecture(instance.nn2)
+    )
+    if tier == "B" or not is_same_arch:
+        raise ValueError(
+            f"ReluDiff/NeuroDiff cannot run Tier B / diff-arch distillation pair "
+            f"{pair_id!r} (architectures differ). Use Tier A same-arch pairs "
+            f"(e.g. pairs=kd_a1) or Relational-MILP / ab-CROWN for Tier B."
+        )
+
+    nnet1_meta = instance.metadata.get("nnet1_path")
+    if isinstance(nnet1_meta, str):
+        nnet1_path = Path(nnet1_meta)
+    else:
+        nnet1_path = Path("data/distillation/mnist") / pair_id / "teacher.nnet"
+    if not nnet1_path.exists():
+        raise FileNotFoundError(
+            f"distillation teacher .nnet not found: {nnet1_path}. Train with "
+            f"`python -m training.distill_mnist --pair-id {pair_id}`."
+        )
+
+    if pair_id not in cache:
+        nnet2_path = work_dir / f"{pair_id}__student.nnet"
+        write_nnet_layers(nnet1_path, instance.nn2, nnet2_path)
+        cache[pair_id] = nnet2_path
+    return nnet1_path, cache[pair_id]
 
 
 def run_instance(
@@ -289,7 +336,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run an NN-equivalence suite with ReluDiff/NeuroDiff."
     )
-    parser.add_argument("--suite", default=SUPPORTED_SUITE)
+    parser.add_argument("--suite", default=DEFAULT_SUITE)
     parser.add_argument(
         "--suite-options",
         action="append",
@@ -313,8 +360,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=DEFAULT_DATA_DIR,
-        help="Directory holding the base ReluDiff MNIST .nnet files.",
+        default=None,
+        help="Base network directory for mnist_reludiff "
+        "(default: data/reludiff_mnist). Ignored for distillation, which uses "
+        "each instance's teacher .nnet path.",
     )
     parser.add_argument("--csv", type=Path, default=None)
     parser.add_argument("--verbose", action="store_true")
@@ -323,12 +372,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if args.suite != SUPPORTED_SUITE:
+    if args.suite not in SUPPORTED_SUITES:
         raise SystemExit(
-            f"run_diffverifier only supports the {SUPPORTED_SUITE!r} suite "
-            "(the property-id mapping is MNIST-specific)."
+            f"run_diffverifier supports suites {sorted(SUPPORTED_SUITES)}; "
+            f"got {args.suite!r}. Distillation Tier B (diff-arch) is unsupported "
+            "by ReluDiff/NeuroDiff — use Tier A same-arch pairs."
         )
     binary = resolve_binary(args)
+    data_dir = args.data_dir or DEFAULT_DATA_DIR
     try:
         suite_options = parse_suite_options(args.suite_options)
         suite = load_suite(args.suite, suite_options)
@@ -347,7 +398,7 @@ def main() -> None:
     total = len(suite.instances)
     for index, instance in enumerate(suite.instances, start=1):
         result = run_instance(
-            instance, binary, args.data_dir, work_dir, cache, args.verbose
+            instance, binary, data_dir, work_dir, cache, args.verbose
         )
         results.append(result)
         print_progress(

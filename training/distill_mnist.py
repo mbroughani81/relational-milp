@@ -30,27 +30,52 @@ from nn_equivalence.reludiff_nnet import (
     write_nnet_from_scratch,
 )
 
+# Tier A: same architecture → comparable with ReluDiff / NeuroDiff.
+# Tier B: different architecture → Relational-MILP / ab-CROWN only.
 PAIR_PRESETS: dict[str, dict[str, Any]] = {
+    "kd_a1": {
+        "tier": "A",
+        "teacher_hidden": [64, 32],
+        "student_hidden": [64, 32],
+        "temperature": 2.0,
+        "alpha": 0.5,
+        "description": (
+            "Tier A same-arch KD (784-64-32-10); fair ReluDiff/NeuroDiff comparison"
+        ),
+    },
+    "kd_a2": {
+        "tier": "A",
+        "teacher_hidden": [128, 64],
+        "student_hidden": [128, 64],
+        "temperature": 2.0,
+        "alpha": 0.5,
+        "description": (
+            "Tier A larger same-arch KD (784-128-64-10); ReluDiff/NeuroDiff comparable"
+        ),
+    },
     "kd_1": {
+        "tier": "B",
         "teacher_hidden": [64, 32],
         "student_hidden": [32, 16],
         "temperature": 2.0,
         "alpha": 0.5,
-        "description": "baseline capacity gap",
+        "description": "Tier B baseline capacity gap (diff-arch)",
     },
     "kd_2": {
+        "tier": "B",
         "teacher_hidden": [64, 32],
         "student_hidden": [32, 16],
         "temperature": 4.0,
         "alpha": 0.5,
-        "description": "same architectures as kd_1, softer targets (T=4)",
+        "description": "Tier B same as kd_1, softer targets (T=4)",
     },
     "kd_3": {
+        "tier": "B",
         "teacher_hidden": [128, 64],
         "student_hidden": [32, 16],
         "temperature": 2.0,
         "alpha": 0.5,
-        "description": "larger teacher/student capacity gap",
+        "description": "Tier B larger teacher/student capacity gap (diff-arch)",
     },
 }
 
@@ -501,10 +526,26 @@ def resolve_config(args: argparse.Namespace) -> dict[str, Any]:
     if temperature <= 0:
         raise SystemExit("--temperature must be positive")
 
+    teacher_list = list(teacher_hidden)
+    student_list = list(student_hidden)
+    tier = preset.get("tier")
+    if tier is None:
+        tier = "A" if teacher_list == student_list else "B"
+    if tier not in {"A", "B"}:
+        raise SystemExit("tier must be 'A' (same-arch) or 'B' (diff-arch)")
+    if tier == "A" and teacher_list != student_list:
+        raise SystemExit("Tier A requires identical teacher and student architectures")
+    if tier == "B" and teacher_list == student_list:
+        raise SystemExit(
+            "Tier B expects different teacher/student architectures "
+            "(use Tier A for same-arch KD)"
+        )
+
     return {
         "preset": preset_name,
-        "teacher_hidden": list(teacher_hidden),
-        "student_hidden": list(student_hidden),
+        "tier": tier,
+        "teacher_hidden": teacher_list,
+        "student_hidden": student_list,
         "temperature": float(temperature),
         "alpha": float(alpha),
         "description": preset.get("description", ""),
@@ -539,11 +580,11 @@ def main() -> None:
     )
 
     teacher = MnistReluMLP(config["teacher_hidden"]).to(device)
-    student = MnistReluMLP(config["student_hidden"]).to(device)
 
     print("Knowledge distillation MNIST pair")
     print("=" * 40)
     print(f"pair_id: {args.pair_id}")
+    print(f"tier: {config['tier']}")
     print(f"device: {device}")
     print(f"teacher: 784-{'-'.join(map(str, config['teacher_hidden']))}-10")
     print(f"student: 784-{'-'.join(map(str, config['student_hidden']))}-10")
@@ -560,6 +601,10 @@ def main() -> None:
         lr=args.lr,
     )
     freeze_model(teacher)
+
+    # Independent student initialization (especially important for Tier A).
+    set_seed(args.seed + 1)
+    student = MnistReluMLP(config["student_hidden"]).to(device)
 
     print("\n[2/4] Distilling student (Hinton KD)...")
     train_student_kd(
@@ -604,12 +649,15 @@ def main() -> None:
     metadata = {
         "pair_id": args.pair_id,
         "preset": config["preset"],
+        "tier": config["tier"],
         "description": config["description"],
         "teacher_arch": teacher_arch,
         "student_arch": student_arch,
+        "same_architecture": teacher_arch == student_arch,
         "temperature": config["temperature"],
         "alpha": config["alpha"],
         "seed": args.seed,
+        "student_init_seed": args.seed + 1,
         "teacher_epochs": args.teacher_epochs,
         "student_epochs": args.student_epochs,
         "train_subset_size": args.train_subset_size,
@@ -631,6 +679,7 @@ def main() -> None:
         "suggested_epsilons": epsilons,
         "teacher_param_count": stats.teacher_param_count,
         "student_param_count": stats.student_param_count,
+        "compatible_with_reludiff_neurodiff": config["tier"] == "A",
     }
 
     print("\n[4/4] Exporting networks...")

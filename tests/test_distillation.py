@@ -97,8 +97,10 @@ def test_distillation_suite_loads_from_fixture_pair(tmp_path: Path, monkeypatch)
         json.dumps(
             {
                 "pair_id": "kd_toy",
+                "tier": "B",
                 "teacher_arch": [784, 8, 10],
                 "student_arch": [784, 4, 10],
+                "same_architecture": False,
                 "temperature": 2.0,
                 "alpha": 0.5,
                 "seed": 0,
@@ -152,4 +154,21 @@ def test_load_kd_1_suite(monkeypatch) -> None:
     for instance in suite.instances:
         assert network_architecture(instance.nn1) == [784, 64, 32, 10]
         assert network_architecture(instance.nn2) == [784, 32, 16, 10]
+        assert instance.metadata["tier"] == "B"
+        assert instance.metadata["same_architecture"] == 0
         validate_instance(instance)
+
+
+@requires_pair
+def test_tiers_filter_selects_matching_pairs(monkeypatch) -> None:
+    monkeypatch.chdir(REPO_ROOT)
+    suite = load_suite(
+        {
+            "tiers": "B",
+            "modes": "three_pixel",
+            "limit": "1",
+            "epsilon": "0.1",
+        }
+    )
+    assert suite.instances
+    assert all(inst.metadata["tier"] == "B" for inst in suite.instances)
