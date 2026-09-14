@@ -2,6 +2,35 @@
 
 ## Setup
 
+### One-shot setup (recommended)
+
+Clone the repo on a fresh server and run:
+
+```bash
+./setup.sh
+```
+
+This provisions everything that can be automated: system build tools, a project
+`.venv` with the Python requirements, the ReluDiff/NeuroDiff C verifiers
+(OpenBLAS + `delta_network_test`), and the ReluDiff MNIST fixtures under
+`data/reludiff_mnist/`. Afterwards `prune-experiment/recreate.sh` runs end to end.
+
+Two verifiers rely on external, non-free pieces that a script cannot install; it
+only detects them and prints guidance:
+
+- `milp_abcrown` needs a licensed **CPLEX**. Point setup at your install with
+  `CPLEX_HOME=/path/to/CPLEX_StudioXXXX ./setup.sh` to install its python
+  bindings into the venv.
+- `abcrown` (and `milp_abcrown`'s bound tightening) needs **alpha-beta-CROWN**.
+  Expose a checkout with `ABCROWN_HOME=/path/to/alpha-beta-CROWN ./setup.sh`.
+
+`recreate.sh` runs whichever of the four verifiers are available and skips the
+rest, so a partial environment still produces results. Useful flags:
+`./setup.sh --no-torch` (skip torch, i.e. reludiff/neurodiff only) and
+`./setup.sh --skip-system` (don't touch apt).
+
+### Manual setup
+
 Use Python 3.10 or newer from the repository root.
 
 ```bash

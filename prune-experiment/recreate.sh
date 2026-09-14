@@ -131,6 +131,25 @@ if [ ! -x "$RELUDIFF_BIN" ] || [ ! -x "$NEURODIFF_BIN" ]; then
 	SKIP_DIFF=1
 fi
 
+# milp_abcrown needs a licensed CPLEX; both milp_abcrown and abcrown need
+# alpha-beta-CROWN (the former for bound tightening). Probe the run python so a
+# partial environment skips the methods it cannot run instead of failing every
+# config. See setup.sh (CPLEX_HOME / ABCROWN_HOME) to provision them.
+SKIP_CPLEX=0
+if ! "$PY" -c "import cplex" >/dev/null 2>&1; then
+	echo "WARNING: CPLEX python bindings not importable by the run python ($PY)" >&2
+	echo "         (milp_abcrown will be skipped; run setup.sh with CPLEX_HOME set)" >&2
+	SKIP_CPLEX=1
+fi
+
+SKIP_ABCROWN=0
+if ! "$PY" -c "from abcrown import ABCrownSolver" >/dev/null 2>&1; then
+	echo "WARNING: alpha-beta-CROWN not importable by the run python ($PY)" >&2
+	echo "         (abcrown, and milp_abcrown bound-tightening, will be skipped;" >&2
+	echo "          run setup.sh with ABCROWN_HOME set)" >&2
+	SKIP_ABCROWN=1
+fi
+
 echo "=============================================================="
 echo " Pruning experiment [$MODE_LABEL]"
 echo "   archs   : ${ARCHS[*]}"
@@ -166,7 +185,8 @@ common_opts() {
 }
 
 # Fill the global CMD array with the verifier invocation for one config.
-# Returns 1 when the method needs a ReluDiff/NeuroDiff binary that is missing.
+# Returns 1 when the method's backend (a ReluDiff/NeuroDiff binary, CPLEX, or
+# alpha-beta-CROWN) is unavailable, so the caller skips it.
 declare -a CMD
 build_cmd() {
 	local method="$1" arch="$2" mode="$3" rate="$4" limit="$5" out="$6"
@@ -174,9 +194,11 @@ build_cmd() {
 	mapfile -t opts < <(common_opts "$arch" "$(sparsity_of "$rate")" "$mode" "$limit")
 	case "$method" in
 		milp_abcrown)
+			{ [ "$SKIP_CPLEX" -eq 1 ] || [ "$SKIP_ABCROWN" -eq 1 ]; } && return 1
 			CMD=("$PY" -m benchmarks.run_pyomo "${opts[@]}"
 			     --solver cplex --bound-tightening abcrown --csv "$out") ;;
 		abcrown)
+			[ "$SKIP_ABCROWN" -eq 1 ] && return 1
 			CMD=("$PY" -m benchmarks.run_crown "${opts[@]}"
 			     --profile "$CROWN_PROFILE" --csv "$out") ;;
 		reludiff)

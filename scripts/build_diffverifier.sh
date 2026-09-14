@@ -50,8 +50,16 @@ if [[ ! -f "$PREFIX/lib/libopenblas.so.0" ]]; then
 		tar xzf "$workdir/openblas.tar.gz" -C "$workdir"
 	fi
 	pushd "$workdir/OpenBLAS-0.3.6" >/dev/null
-	make -j"$(nproc)" USE_THREAD=1 COMMON_OPT="-O2 $WNO -Wno-implicit-int"
-	make PREFIX="$PREFIX" install
+	# delta_network_test only uses cblas_sgemm (single-precision BLAS) and needs
+	# no LAPACK, so build BLAS-only: NO_LAPACK=1 NOFORTRAN=1 drops the Fortran
+	# LAPACK (and thus any libgfortran runtime dependency), keeping the binaries
+	# portable to servers without gfortran. Build the library targets explicitly
+	# (libs shared) rather than the default `all`, which also runs OpenBLAS
+	# 0.3.6's self-test suite; that test driver segfaults under modern GCC/glibc
+	# and would abort the build before `make install`.
+	make -j"$(nproc)" USE_THREAD=1 NO_LAPACK=1 NOFORTRAN=1 \
+		COMMON_OPT="-O2 $WNO -Wno-implicit-int" libs shared
+	make PREFIX="$PREFIX" NO_LAPACK=1 NOFORTRAN=1 install
 	popd >/dev/null
 	rm -rf "$workdir"
 else
