@@ -49,6 +49,34 @@ runs `abcrown`, `reludiff`, and `neurodiff` and skips `milp_abcrown`). Useful
 flags: `./setup.sh --no-torch` (skip torch/abcrown, i.e. reludiff/neurodiff only)
 and `./setup.sh --skip-system` (don't touch apt).
 
+### CPLEX on a shared volume (across cluster instances)
+
+CPLEX is the one dependency that cannot be rebuilt from source, so it is the
+only thing worth keeping on a persistent volume shared across nodes. Everything
+else — the venv, torch, abcrown/`auto_LiRPA`, OpenBLAS, and the ReluDiff/
+NeuroDiff binaries — is intentionally rebuilt from source on each node; caching
+those would mask reproducibility failures.
+
+Copy the `cplex/` subtree of a CPLEX Studio install onto the volume once (that
+subtree, ~120 MB, is all `milp_abcrown` needs — skip `opl/`, `cpoptimizer/`,
+etc.; a 1 GB volume is plenty):
+
+```bash
+SD=/mnt/exp-data
+mkdir -p "$SD/ibm/CPLEX_Studio222"
+cp -a /path/to/CPLEX_Studio222/cplex "$SD/ibm/CPLEX_Studio222/"
+```
+
+Then on every node that mounts the volume, point setup at it:
+
+```bash
+CPLEX_HOME=/mnt/exp-data/ibm/CPLEX_Studio222 ./setup.sh
+```
+
+`setup.sh` resolves `$CPLEX_HOME/cplex/bin/*/cplex`, links that full-edition CLI
+onto `PATH`, and `milp_abcrown` solves through it. Note `CPLEX_HOME` is the
+directory that *contains* `cplex/`, not the `cplex/` subtree itself.
+
 ### Manual setup
 
 Use **Python 3.11** from the repository root (see above for why).
