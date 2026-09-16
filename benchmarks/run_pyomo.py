@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import importlib
 import json
+import os
+import shutil
 import tempfile
 import time
 from dataclasses import dataclass
@@ -215,10 +218,70 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def resolve_cplex_executable() -> str | None:
+    """Locate a full-edition CPLEX command-line binary.
+
+    Looked up in order: ``CPLEX_EXECUTABLE``, ``$CPLEX_HOME/cplex/bin/*/cplex``,
+    then ``cplex`` on ``PATH``. Returns ``None`` when nothing is found.
+    """
+    env_exe = os.environ.get("CPLEX_EXECUTABLE")
+    if env_exe and os.access(env_exe, os.X_OK):
+        return env_exe
+    cplex_home = os.environ.get("CPLEX_HOME")
+    if cplex_home:
+        for candidate in sorted(
+            glob.glob(os.path.join(cplex_home, "cplex", "bin", "*", "cplex"))
+        ):
+            if os.access(candidate, os.X_OK):
+                return candidate
+    return shutil.which("cplex")
+
+
 def create_solver(
     solver_name: SolverName,
     timeout_sec: float,
+    *,
+    debug: bool = False,
 ) -> Any:
+    # Backend selection (env CPLEX_BACKEND):
+    #   direct -> Python API (cplex_direct). Needed for --debug presolve/progress
+    #             stats, and requires the FULL-edition cplex Python bindings; the
+    #             PyPI community wheel silently caps models at 1000 vars/constraints.
+    #   file   -> LP/MPS file interface, driving the `cplex` CLI binary. The CLI
+    #             shipped in a CPLEX Studio install is full-edition and needs no
+    #             Python-version-matched bindings.
+    #   auto   -> file when a CPLEX CLI is found (avoids the community-wheel cap),
+    #             else direct. (default)
+    backend = os.environ.get("CPLEX_BACKEND", "auto").lower()
+    cli = resolve_cplex_executable()
+    if backend not in ("auto", "direct", "file"):
+        raise RuntimeError(
+            f"CPLEX_BACKEND={backend!r} is invalid; use auto, direct, or file."
+        )
+    if backend == "auto":
+        backend = "file" if cli else "direct"
+
+    if backend == "file":
+        if debug:
+            raise RuntimeError(
+                "--debug CPLEX presolve/progress stats require the Python API "
+                "(CPLEX_BACKEND=direct with full-edition cplex bindings); they are "
+                "unavailable with the file backend."
+            )
+        solver = (
+            pyo.SolverFactory("cplex", executable=cli)
+            if cli
+            else pyo.SolverFactory("cplex")
+        )
+        if not solver.available(False):
+            raise RuntimeError(
+                "Pyomo 'cplex' file backend is unavailable: no cplex executable "
+                "found. Set CPLEX_HOME (or CPLEX_EXECUTABLE), or put the CPLEX "
+                "Studio `cplex` binary on PATH."
+            )
+        solver.options["timelimit"] = timeout_sec
+        return solver
+
     backend_name = "cplex_direct"
     solver = pyo.SolverFactory(backend_name)
     if not solver.available(False):
@@ -410,6 +473,7 @@ def solve_instance_direction(
     solver = create_solver(
         solver_name,
         instance.timeout_sec,
+        debug=debug,
     )
     solver_setup_runtime_sec = time.perf_counter() - solver_setup_start
 

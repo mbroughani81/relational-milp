@@ -136,9 +136,10 @@ fi
 # partial environment skips the methods it cannot run instead of failing every
 # config. See setup.sh (CPLEX_HOME / ABCROWN_HOME) to provision them.
 SKIP_CPLEX=0
-if ! "$PY" -c "import cplex" >/dev/null 2>&1; then
-	echo "WARNING: CPLEX python bindings not importable by the run python ($PY)" >&2
+if ! "$PY" -c "from benchmarks.run_pyomo import resolve_cplex_executable as r; import sys; sys.exit(0 if r() else 1)" >/dev/null 2>&1; then
+	echo "WARNING: no full CPLEX executable resolvable by the run python ($PY)" >&2
 	echo "         (milp_abcrown will be skipped; run setup.sh with CPLEX_HOME set)" >&2
+	echo "         note: 'pip install cplex' is Community Edition and is NOT used here" >&2
 	SKIP_CPLEX=1
 fi
 

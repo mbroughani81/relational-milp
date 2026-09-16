@@ -10,47 +10,87 @@ Clone the repo on a fresh server and run:
 ./setup.sh
 ```
 
-This provisions everything that can be automated: system build tools, a project
-`.venv` with the Python requirements, the ReluDiff/NeuroDiff C verifiers
-(OpenBLAS + `delta_network_test`), and the ReluDiff MNIST fixtures under
-`data/reludiff_mnist/`. Afterwards `prune-experiment/recreate.sh` runs end to end.
+This provisions everything that can be automated: system build tools, a
+**Python 3.11** project `.venv` with the Python requirements, **alpha-beta-CROWN
+(`abcrown`) and `auto_LiRPA`** installed into that venv, the ReluDiff/NeuroDiff C
+verifiers (OpenBLAS + `delta_network_test`), and the ReluDiff MNIST fixtures
+under `data/reludiff_mnist/`. Afterwards `prune-experiment/recreate.sh` runs end
+to end.
 
-Two verifiers rely on external, non-free pieces that a script cannot install; it
-only detects them and prints guidance:
+Python 3.11 is required because the alpha-beta-CROWN / `auto_LiRPA` releases that
+expose the high-level API this repo uses (`ABCrownSolver`, `ConfigBuilder`,
+`IOConstraints`, `input_vars`, `output_vars`) pin `requires-python = ~=3.11.0`.
+`setup.sh` installs a 3.11 interpreter via the deadsnakes PPA when the host only
+ships a newer Python; pass `PYTHON_BIN=/path/to/python3.11` to use your own.
 
-- `milp_abcrown` needs a licensed **CPLEX**. Point setup at your install with
-  `CPLEX_HOME=/path/to/CPLEX_StudioXXXX ./setup.sh` to install its python
-  bindings into the venv.
-- `abcrown` (and `milp_abcrown`'s bound tightening) needs **alpha-beta-CROWN**.
-  Expose a checkout with `ABCROWN_HOME=/path/to/alpha-beta-CROWN ./setup.sh`.
+alpha-beta-CROWN is cloned to `third_party/alpha-beta-CROWN` (pinned commit,
+override with `ABCROWN_COMMIT=`) with its `auto_LiRPA` submodule, and both are
+`pip install`ed into the venv. To reuse an existing checkout instead, point setup
+at it with `ABCROWN_HOME=/path/to/alpha-beta-CROWN ./setup.sh`.
+
+torch/torchvision are pre-installed as CPU wheels (`torch==2.11.0`) pinned to what
+abcrown expects; on a GPU host set `TORCH_INDEX_URL=` to a CUDA wheel index (e.g.
+`https://download.pytorch.org/whl/cu124`).
+
+One verifier still relies on an external, non-free piece that a script cannot
+install; setup only detects it and prints guidance:
+
+- `milp_abcrown` needs a licensed **CPLEX**. Point setup at a CPLEX Studio
+  install with `CPLEX_HOME=/path/to/CPLEX_StudioXXXX ./setup.sh`; setup links its
+  full-edition `cplex` CLI onto `PATH`, which `benchmarks.run_pyomo` drives via
+  Pyomo's file backend. **Do not** rely on `pip install cplex` — the PyPI wheel
+  is the size-capped **Community Edition** (max 1000 vars/constraints, fails with
+  `CPLEX Error 1016` on these models). (`milp_abcrown` also uses abcrown bound
+  tightening, which setup installs.)
 
 `recreate.sh` runs whichever of the four verifiers are available and skips the
-rest, so a partial environment still produces results. Useful flags:
-`./setup.sh --no-torch` (skip torch, i.e. reludiff/neurodiff only) and
-`./setup.sh --skip-system` (don't touch apt).
+rest, so a partial environment still produces results (e.g. a node without CPLEX
+runs `abcrown`, `reludiff`, and `neurodiff` and skips `milp_abcrown`). Useful
+flags: `./setup.sh --no-torch` (skip torch/abcrown, i.e. reludiff/neurodiff only)
+and `./setup.sh --skip-system` (don't touch apt).
 
 ### Manual setup
 
-Use Python 3.10 or newer from the repository root.
+Use **Python 3.11** from the repository root (see above for why).
 
 ```bash
-python3 -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install --upgrade pip
+python3 -m pip install --index-url https://download.pytorch.org/whl/cpu \
+  torch==2.11.0 torchvision==0.26.0
 python3 -m pip install -r requirements.txt
 ```
 
-External solver/runtime requirements:
+Install alpha-beta-CROWN (`abcrown`) and `auto_LiRPA` into the same venv so that
+`from abcrown import ABCrownSolver` and `from auto_LiRPA import BoundedModule`
+work. `auto_LiRPA` is a git submodule of alpha-beta-CROWN and must be installed
+separately from the `abcrown` package (the wheel does not bundle it):
 
-- HiGHS: install `highspy` with the requirements above. This is used by Pyomo
-  when running `--solver highs`.
-- Gurobi: install Gurobi, configure a valid license, and install `gurobipy`.
-  This is needed for the direct Gurobi runner and for Pyomo with
-  `--solver gurobi`.
-- alpha-beta-CROWN: install alpha-beta-CROWN in the same Python
-  environment so that `from abcrown import ABCrownSolver` works. The CROWN
-  runner uses the high-level Python API and writes per-instance configs/results
-  under `artifacts/abcrown_instances/`.
+```bash
+git clone --recurse-submodules \
+  https://github.com/Verified-Intelligence/alpha-beta-CROWN.git third_party/alpha-beta-CROWN
+python3 -m pip install third_party/alpha-beta-CROWN/auto_LiRPA
+python3 -m pip install third_party/alpha-beta-CROWN
+```
+
+The CROWN runner uses abcrown's high-level Python API and writes per-instance
+configs/results under `artifacts/abcrown_instances/`. `auto_LiRPA` provides the
+ReLU pre-activation bound tightening used by `--bound-tightening abcrown`.
+
+Other external solver/runtime requirements:
+
+- CPLEX: `benchmarks.run_pyomo` solves the MILP encoding with CPLEX, so
+  `milp_abcrown` needs a licensed CPLEX Studio install. The backend is chosen by
+  `CPLEX_BACKEND`:
+  - `auto` (default) — uses the **file** backend when a `cplex` CLI is
+    resolvable (from `CPLEX_EXECUTABLE`, `$CPLEX_HOME/cplex/bin/*/cplex`, or
+    `PATH`), else the Python API. The CLI shipped in a Studio install is
+    full-edition and needs no Python-version-matched bindings.
+  - `file` — force the LP/MPS file interface driving the `cplex` CLI.
+  - `direct` — force the `cplex_direct` Python API (required for `--debug`
+    presolve/progress stats; needs the **full-edition** `cplex` Python bindings,
+    not the size-capped PyPI Community Edition wheel).
 
 Download the original ReluDiff MNIST networks and the paper's 100 test inputs:
 
