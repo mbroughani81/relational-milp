@@ -48,6 +48,15 @@ RUN="${RUN:-prune-10min}"
 OUT="$SHARED/$RUN"
 RECLAIM_STALE_SEC="${RECLAIM_STALE_SEC:-0}"
 
+# Queue-level skip list: cells whose tag matches any pattern here are dropped
+# from the sweep entirely (never claimed, never run) by EVERY worker. One glob
+# pattern per line (shell case-globbing: * ? [..]); blank lines and #-comments
+# ignored. This is distinct from recreate.sh's per-image skip.conf (SKIP_FILE
+# above). Read live, per-cell, so edits propagate to running workers WITHOUT a
+# restart -- but a worker only gains this skip logic once it is (re)started on
+# this version of the script.
+QUEUE_SKIP_FILE="${QUEUE_SKIP_FILE:-$REPO_ROOT/prune-experiment/queue_skip.conf}"
+
 # Disable recreate.sh's skip.conf so NOTHING is skipped: every cell runs its full
 # LIMIT images at the full TIMEOUT, including the ones skip.conf marks hopeless.
 # (Empty EXP_SKIP_FILE turns skipping off; set SKIP_FILE=prune-experiment/skip.conf
@@ -87,17 +96,31 @@ tags() {
 }
 
 cell_done() {  # a cell is done when its results CSV has a header + >=1 data row
-	[ "$(wc -l <"$OUT/results/$1.csv" 2>/dev/null || echo 0)" -gt 1 ]
+	local f="$OUT/results/$1.csv"
+	[ -f "$f" ] && [ "$(wc -l <"$f" 2>/dev/null || echo 0)" -gt 1 ]
+}
+
+cell_skipped() {  # true if tag matches any glob pattern in QUEUE_SKIP_FILE
+	local tag="$1" pat
+	[ -f "$QUEUE_SKIP_FILE" ] || return 1
+	while IFS= read -r pat || [ -n "$pat" ]; do
+		pat="${pat%%#*}"; pat="${pat#"${pat%%[![:space:]]*}"}"; pat="${pat%"${pat##*[![:space:]]}"}"
+		[ -z "$pat" ] && continue
+		# shellcheck disable=SC2254
+		case "$tag" in $pat) return 0;; esac
+	done < "$QUEUE_SKIP_FILE"
+	return 1
 }
 
 if [ "${PROGRESS:-0}" = "1" ]; then
-	total=0 done=0 claimed=0
+	total=0 done=0 claimed=0 skipped=0
 	while read -r tag; do
 		total=$((total+1))
-		if cell_done "$tag"; then done=$((done+1))
+		if cell_skipped "$tag"; then skipped=$((skipped+1))
+		elif cell_done "$tag"; then done=$((done+1))
 		elif [ -d "$OUT/queue/$tag.lock" ]; then claimed=$((claimed+1)); fi
 	done < <(tags)
-	echo "run=$RUN  done=$done/$total  in-progress=$claimed  pending=$((total-done-claimed))"
+	echo "run=$RUN  done=$done/$total  in-progress=$claimed  skipped=$skipped  pending=$((total-done-claimed-skipped))"
 	exit 0
 fi
 
@@ -106,6 +129,7 @@ echo "worker $HOST starting on queue $OUT (methods=${METHODS[*]} archs=${ARCHS[*
 
 worked=0
 while read -r tag; do
+	cell_skipped "$tag" && continue
 	cell_done "$tag" && continue
 	lock="$OUT/queue/$tag.lock"
 
