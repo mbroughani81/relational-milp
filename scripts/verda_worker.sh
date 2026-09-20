@@ -7,9 +7,11 @@
 # reludiff/neurodiff cells get mopped up), so scaling is just "add more nodes".
 #
 # Prereqs on each node (see README + setup.sh):
+#   * RUNTIME_DIR exported (required; base dir for data/third_party/artifacts)
 #   * shared volume mounted at $SHARED (default /mnt/exp-data)
 #   * CPLEX subtree already copied to $SHARED/ibm/CPLEX_Studio222/cplex  (once)
 #   * ./setup.sh already run, e.g.:
+#       export RUNTIME_DIR="$PWD/runtime"
 #       CPLEX_HOME=$SHARED/ibm/CPLEX_Studio222 ./setup.sh
 #
 # Usage (from repo root):
@@ -29,6 +31,7 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
+. "$REPO_ROOT/scripts/require_runtime_dir.sh"
 
 # --------------------------------------------------------------------------- #
 # The sweep grid. Defaults encode the request: relational-milp + the two diff

@@ -19,6 +19,7 @@ from nn_equivalence.reludiff_nnet import (
     validate_mnist_reludiff_network,
 )
 from nn_equivalence.nn_types import NeuralNetwork
+from nn_equivalence.paths import runtime_path
 
 DEFAULT_SUITE_OPTIONS: SuiteOptions = {
     "epsilon": "1.0",
@@ -167,7 +168,7 @@ def load_suite(suite_options: SuiteOptions | None = None) -> InstanceSuite:
     suite_name = "mnist_reludiff"
     options = _normalized_options(suite_options)
     print(f"{suite_name} suite options: {options}", file=sys.stderr)
-    data_dir = Path("data/reludiff_mnist")
+    data_dir = runtime_path("data/reludiff_mnist")
     network_names = _option_tuple(options, "networks")
     _validate_network_names(network_names)
     _require_data(data_dir, network_names)

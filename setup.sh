@@ -13,7 +13,12 @@
 #   3. alpha-beta-CROWN (abcrown) + auto_LiRPA installed INTO that venv, so
 #      `from abcrown import ABCrownSolver` and `from auto_LiRPA import ...` work
 #   4. the ReluDiff/NeuroDiff C verifiers (OpenBLAS + delta_network_test)
-#   5. the ReluDiff MNIST fixtures under data/reludiff_mnist/
+#   5. the ReluDiff MNIST fixtures under $RUNTIME_DIR/data/reludiff_mnist/
+#
+# Everything this script downloads or builds (third_party checkouts, data
+# fixtures, artifacts) lands under the REQUIRED $RUNTIME_DIR base directory so
+# the repo base stays clean; only the .venv is kept at the repo root, by
+# convention. Export RUNTIME_DIR before running, e.g. RUNTIME_DIR="$PWD/runtime".
 #
 # Why Python 3.11? The alpha-beta-CROWN / auto_LiRPA releases that expose the
 # high-level API this repo uses (ABCrownSolver, ConfigBuilder, IOConstraints,
@@ -57,7 +62,12 @@ cd "$REPO_ROOT"
 
 VENV="$REPO_ROOT/.venv"
 PY="$VENV/bin/python"
-ARTIFACT_DIR="$REPO_ROOT/third_party/NeuroDiff-ASE2020-Artifact"
+# All generated/downloaded content lives under $RUNTIME_DIR (required; see the
+# require_runtime_dir.sh guard sourced below) so the repo base stays clean. The
+# venv is the one exception (kept at repo root by convention).
+. "$REPO_ROOT/scripts/require_runtime_dir.sh"
+RUNTIME="$RUNTIME_DIR"
+ARTIFACT_DIR="$RUNTIME/third_party/NeuroDiff-ASE2020-Artifact"
 DIFFNN="$ARTIFACT_DIR/DiffNN-Code"
 ARTIFACT_REPO="https://github.com/pauls658/NeuroDiff-ASE2020-Artifact"
 
@@ -65,7 +75,7 @@ ARTIFACT_REPO="https://github.com/pauls658/NeuroDiff-ASE2020-Artifact"
 # this repo was validated against; override ABCROWN_COMMIT to move it.
 ABCROWN_REPO="${ABCROWN_REPO:-https://github.com/Verified-Intelligence/alpha-beta-CROWN.git}"
 ABCROWN_COMMIT="${ABCROWN_COMMIT:-e5c7e17bf0488843acb77b7519f59876717a49f4}"
-ABCROWN_DIR_DEFAULT="$REPO_ROOT/third_party/alpha-beta-CROWN"
+ABCROWN_DIR_DEFAULT="$RUNTIME/third_party/alpha-beta-CROWN"
 
 # torch/torchvision versions abcrown pins; pre-installed from a CPU index by
 # default so a CPU cluster node does not pull ~2GB of CUDA wheels.
@@ -264,7 +274,7 @@ build_diffverifier() {
 	if [ ! -d "$DIFFNN" ]; then
 		git clone --depth 1 "$ARTIFACT_REPO" "$ARTIFACT_DIR"
 	fi
-	bash scripts/build_diffverifier.sh
+	bash scripts/build_diffverifier.sh "$ARTIFACT_DIR"
 	if [ -x "$DIFFNN/reludiff" ] && [ -x "$DIFFNN/neurodiff" ]; then
 		ok "reludiff + neurodiff built"
 	else
@@ -279,7 +289,7 @@ will be skipped by recreate.sh"
 download_data() {
 	log "ReluDiff MNIST fixtures"
 	"$PY" scripts/download_mnist_reludiff_nnets.py --artifact-dir "$ARTIFACT_DIR"
-	ok "data/reludiff_mnist populated"
+	ok "runtime/data/reludiff_mnist populated"
 }
 
 # --------------------------------------------------------------------------- #

@@ -33,7 +33,7 @@ from benchmarks.common import (
     validate_instance,
 )
 from nn_equivalence.nn_types import NeuralNetwork
-ARTIFACT_ROOT = Path("artifacts/abcrown_instances")
+from nn_equivalence.paths import runtime_path
 BATCH_SIZE = 512
 ConfigValue = str | int | float | bool | dict[str, "ConfigValue"]
 ConfigDict = dict[str, ConfigValue]
@@ -558,7 +558,7 @@ def prepare_artifacts(
     suite: InstanceSuite,
     profile: str,
 ) -> tuple[Path, list[Instance]]:
-    work_dir = (ARTIFACT_ROOT / suite.name / profile).resolve()
+    work_dir = (runtime_path("artifacts/abcrown_instances") / suite.name / profile).resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
 
     for instance in suite.instances:

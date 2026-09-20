@@ -2,7 +2,7 @@
 """Install the ReluDiff MNIST networks and 100-image test set for the benchmarks.
 
 The benchmark suites (`benchmarks/mnist_reludiff.py`, `benchmarks/distillation.py`)
-read their fixtures from ``data/reludiff_mnist/``:
+read their fixtures from ``$RUNTIME_DIR/data/reludiff_mnist/``:
 
   * ``mnist_relu_2_512.nnet``   (784-512-512-10)
   * ``mnist_relu_3_100.nnet``   (784-100-100-10-10)
@@ -18,13 +18,13 @@ missing it is cloned automatically (shallow) unless ``--no-clone`` is given.
 
 Usage::
 
-    python3 scripts/download_mnist_reludiff_nnets.py            # install into data/reludiff_mnist/
+    python3 scripts/download_mnist_reludiff_nnets.py            # install into runtime/data/reludiff_mnist/
     python3 scripts/download_mnist_reludiff_nnets.py --force    # overwrite existing files
     python3 scripts/download_mnist_reludiff_nnets.py --check-only
     python3 scripts/download_mnist_reludiff_nnets.py --output-dir /path --check-only
 
 ``--check-only`` validates the installed files (in ``--output-dir``, default
-``data/reludiff_mnist``) without downloading anything and exits non-zero if a
+``runtime/data/reludiff_mnist``) without downloading anything and exits non-zero if a
 file is missing, malformed, or has the wrong architecture.
 """
 
@@ -41,6 +41,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from nn_equivalence.paths import runtime_path  # noqa: E402
 from nn_equivalence.reludiff_nnet import (  # noqa: E402
     MNIST_RELUDIFF_NETWORKS,
     load_nnet_layers,
@@ -48,8 +49,6 @@ from nn_equivalence.reludiff_nnet import (  # noqa: E402
     validate_mnist_reludiff_network,
 )
 
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "data" / "reludiff_mnist"
-DEFAULT_ARTIFACT_DIR = REPO_ROOT / "third_party" / "NeuroDiff-ASE2020-Artifact"
 ARTIFACT_REPO = "https://github.com/pauls658/NeuroDiff-ASE2020-Artifact"
 
 MNIST_TESTS_HEADER = "mnist_tests.h"
@@ -161,18 +160,21 @@ def install(output_dir: Path, artifact_dir: Path, force: bool, allow_clone: bool
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    # Defaults (when unset) resolve under $RUNTIME_DIR in main(), so --help works
+    # without RUNTIME_DIR being set.
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=DEFAULT_OUTPUT_DIR,
-        help="where to install / check the fixtures (default: data/reludiff_mnist)",
+        default=None,
+        help="where to install / check the fixtures "
+        "(default: $RUNTIME_DIR/data/reludiff_mnist)",
     )
     parser.add_argument(
         "--artifact-dir",
         type=Path,
-        default=DEFAULT_ARTIFACT_DIR,
+        default=None,
         help="local NeuroDiff ASE-2020 artifact checkout "
-        "(default: third_party/NeuroDiff-ASE2020-Artifact)",
+        "(default: $RUNTIME_DIR/third_party/NeuroDiff-ASE2020-Artifact)",
     )
     parser.add_argument(
         "--check-only",
@@ -194,6 +196,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    # Fill runtime-relative defaults now (fails fast if RUNTIME_DIR is unset).
+    if args.output_dir is None:
+        args.output_dir = runtime_path("data/reludiff_mnist")
+    if args.artifact_dir is None:
+        args.artifact_dir = runtime_path("third_party/NeuroDiff-ASE2020-Artifact")
     if args.check_only:
         return check_only(args.output_dir)
     return install(

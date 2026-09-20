@@ -11,6 +11,7 @@ from benchmarks.run_diffverifier import (
     parse_tool_stats,
     property_id_for,
 )
+from nn_equivalence.paths import runtime_path
 from nn_equivalence.reludiff_nnet import (
     load_nnet_layers,
     prune_network_unstructured,
@@ -18,12 +19,12 @@ from nn_equivalence.reludiff_nnet import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = REPO_ROOT / "data" / "reludiff_mnist"
+DATA_DIR = runtime_path("data/reludiff_mnist")
 NETWORK = "mnist_relu_3_100"
 
 requires_data = pytest.mark.skipif(
     not (DATA_DIR / f"{NETWORK}.nnet").exists(),
-    reason="ReluDiff MNIST .nnet fixtures not present under data/reludiff_mnist",
+    reason="ReluDiff MNIST .nnet fixtures not present under runtime/data/reludiff_mnist",
 )
 
 
@@ -181,6 +182,6 @@ def test_distillation_nnet_paths_writes_same_arch_student(tmp_path):
     )
     nnet1, nnet2 = _distillation_nnet_paths(instance, {})
     assert nnet1 == teacher_path
-    # Generated student lands next to the teacher (under data/), not artifacts/.
+    # Generated student lands next to the teacher (under runtime/data/), not runtime/artifacts/.
     assert nnet2.parent == teacher_path.parent
     assert load_nnet_layers(nnet2) == student

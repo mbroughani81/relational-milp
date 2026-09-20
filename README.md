@@ -4,9 +4,23 @@
 
 ### One-shot setup (recommended)
 
+All generated/downloaded content (data fixtures, `third_party` checkouts, build
+artifacts) lives under a single base directory set by the **required**
+`RUNTIME_DIR` environment variable, so the repo base stays clean. The scripts
+and Python entrypoints fail fast if it is unset. Export it once (keep it in the
+same directory for later runs — e.g. `recreate.sh`, `verda_worker.sh`):
+
+```bash
+export RUNTIME_DIR="$PWD/runtime"
+```
+
+`RUNTIME_DIR` may point anywhere (a shared volume, a scratch disk); only the
+`.venv` stays at the repo root, by convention.
+
 Clone the repo on a fresh server and run:
 
 ```bash
+export RUNTIME_DIR="$PWD/runtime"
 ./setup.sh
 ```
 
@@ -14,7 +28,7 @@ This provisions everything that can be automated: system build tools, a
 **Python 3.11** project `.venv` with the Python requirements, **alpha-beta-CROWN
 (`abcrown`) and `auto_LiRPA`** installed into that venv, the ReluDiff/NeuroDiff C
 verifiers (OpenBLAS + `delta_network_test`), and the ReluDiff MNIST fixtures
-under `data/reludiff_mnist/`. Afterwards `prune-experiment/recreate.sh` runs end
+under `runtime/data/reludiff_mnist/`. Afterwards `prune-experiment/recreate.sh` runs end
 to end.
 
 Python 3.11 is required because the alpha-beta-CROWN / `auto_LiRPA` releases that
@@ -23,7 +37,7 @@ expose the high-level API this repo uses (`ABCrownSolver`, `ConfigBuilder`,
 `setup.sh` installs a 3.11 interpreter via the deadsnakes PPA when the host only
 ships a newer Python; pass `PYTHON_BIN=/path/to/python3.11` to use your own.
 
-alpha-beta-CROWN is cloned to `third_party/alpha-beta-CROWN` (pinned commit,
+alpha-beta-CROWN is cloned to `runtime/third_party/alpha-beta-CROWN` (pinned commit,
 override with `ABCROWN_COMMIT=`) with its `auto_LiRPA` submodule, and both are
 `pip install`ed into the venv. To reuse an existing checkout instead, point setup
 at it with `ABCROWN_HOME=/path/to/alpha-beta-CROWN ./setup.sh`.
@@ -70,6 +84,7 @@ cp -a /path/to/CPLEX_Studio222/cplex "$SD/ibm/CPLEX_Studio222/"
 Then on every node that mounts the volume, point setup at it:
 
 ```bash
+export RUNTIME_DIR="$PWD/runtime"
 CPLEX_HOME=/mnt/exp-data/ibm/CPLEX_Studio222 ./setup.sh
 ```
 
@@ -97,13 +112,13 @@ separately from the `abcrown` package (the wheel does not bundle it):
 
 ```bash
 git clone --recurse-submodules \
-  https://github.com/Verified-Intelligence/alpha-beta-CROWN.git third_party/alpha-beta-CROWN
-python3 -m pip install third_party/alpha-beta-CROWN/auto_LiRPA
-python3 -m pip install third_party/alpha-beta-CROWN
+  https://github.com/Verified-Intelligence/alpha-beta-CROWN.git "$RUNTIME_DIR/third_party/alpha-beta-CROWN"
+python3 -m pip install "$RUNTIME_DIR/third_party/alpha-beta-CROWN/auto_LiRPA"
+python3 -m pip install "$RUNTIME_DIR/third_party/alpha-beta-CROWN"
 ```
 
 The CROWN runner uses abcrown's high-level Python API and writes per-instance
-configs/results under `artifacts/abcrown_instances/`. `auto_LiRPA` provides the
+configs/results under `$RUNTIME_DIR/artifacts/abcrown_instances/`. `auto_LiRPA` provides the
 ReLU pre-activation bound tightening used by `--bound-tightening abcrown`.
 
 Other external solver/runtime requirements:
@@ -128,7 +143,7 @@ python3 scripts/download_mnist_reludiff_nnets.py
 
 The downloader reads the files from `DiffNN-Code/nnet` in the official
 ReluDiff artifact and validates the architectures before installing them under
-`data/reludiff_mnist/`. In particular, `mnist_relu_3_100` must be
+`runtime/data/reludiff_mnist/`. In particular, `mnist_relu_3_100` must be
 `784-100-100-100-10`; files with architecture `784-100-100-10-10` are rejected.
 
 Check the installed architecture headers without downloading anything:
@@ -137,7 +152,7 @@ Check the installed architecture headers without downloading anything:
 python3 scripts/download_mnist_reludiff_nnets.py --check-only
 ```
 
-The checker reads the files from `data/reludiff_mnist/` by default. Use
+The checker reads the files from `runtime/data/reludiff_mnist/` by default. Use
 `--output-dir PATH` when the `.nnet` files are stored elsewhere. It exits with
 status 1 if a file is missing, malformed, or has the wrong architecture.
 
@@ -236,7 +251,7 @@ presolve pass:
 python3 -m benchmarks.run_pyomo \
   --suite mnist_reludiff \
   --solver cplex \
-  --debug-out artifacts/cplex_debug.json \
+  --debug-out runtime/artifacts/cplex_debug.json \
   --suite-options networks=mnist_relu_3_100 \
   --suite-options modes=global \
   --suite-options limit=10 \
@@ -257,7 +272,7 @@ results on stdout:
 python3 -m benchmarks.run_pyomo \
   --suite sample \
   --solver highs \
-  --solver-log-dir artifacts/solver_logs/sample_highs
+  --solver-log-dir runtime/artifacts/solver_logs/sample_highs
 ```
 
 ## Current benchmark suites

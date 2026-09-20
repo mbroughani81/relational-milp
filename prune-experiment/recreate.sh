@@ -37,6 +37,7 @@ set -uo pipefail
 # --------------------------------------------------------------------------- #
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+. "$REPO_ROOT/scripts/require_runtime_dir.sh"
 RESULTS_DIR="$SCRIPT_DIR/results"
 LOGS_DIR="$SCRIPT_DIR/logs"
 AUDIT_DIR="$SCRIPT_DIR/audit"
@@ -44,7 +45,7 @@ AUDIT_DIR="$SCRIPT_DIR/audit"
 PY="${EXP_PY:-$REPO_ROOT/.venv/bin/python}"
 [ -x "$PY" ] || PY="python3"
 
-DIFF_DIR="$REPO_ROOT/third_party/NeuroDiff-ASE2020-Artifact/DiffNN-Code"
+DIFF_DIR="$RUNTIME_DIR/third_party/NeuroDiff-ASE2020-Artifact/DiffNN-Code"
 RELUDIFF_BIN="$DIFF_DIR/reludiff"
 NEURODIFF_BIN="$DIFF_DIR/neurodiff"
 

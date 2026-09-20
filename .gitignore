@@ -1,8 +1,7 @@
-data/
-models/
+# All generated/downloaded content (data fixtures, third_party checkouts,
+# build artifacts, models) lives under runtime/ to keep the repo base clean.
+runtime/
 plan.md
-artifacts/
-third_party/
 zip_git_visible.py
 *.zip
 *.txt

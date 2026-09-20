@@ -16,12 +16,18 @@
 # Usage:
 #   scripts/build_diffverifier.sh [ARTIFACT_DIR] [MAX_THREAD] [OPENBLAS_PREFIX]
 # Defaults:
-#   ARTIFACT_DIR   = third_party/NeuroDiff-ASE2020-Artifact
+#   ARTIFACT_DIR   = $RUNTIME_DIR/third_party/NeuroDiff-ASE2020-Artifact
 #   MAX_THREAD     = 4
 #   OPENBLAS_PREFIX= $HOME/.local
 set -euo pipefail
 
-ARTIFACT_DIR="${1:-third_party/NeuroDiff-ASE2020-Artifact}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ARTIFACT_DIR may be passed explicitly ($1); otherwise it defaults under the
+# required RUNTIME_DIR base. Only enforce RUNTIME_DIR when we need the default.
+if [ -z "${1:-}" ]; then
+	. "$SCRIPT_DIR/require_runtime_dir.sh"
+fi
+ARTIFACT_DIR="${1:-$RUNTIME_DIR/third_party/NeuroDiff-ASE2020-Artifact}"
 MAX_THREAD="${2:-4}"
 PREFIX="${3:-$HOME/.local}"
 
@@ -30,7 +36,7 @@ WNO+=" -Wno-int-conversion -Wno-implicit-int"
 
 if [[ ! -d "$ARTIFACT_DIR/DiffNN-Code" ]]; then
 	echo "artifact not found at $ARTIFACT_DIR; clone it first:" >&2
-	echo "  git clone https://github.com/pauls658/NeuroDiff-ASE2020-Artifact $ARTIFACT_DIR" >&2
+	echo "  git clone https://github.com/pauls658/NeuroDiff-ASE2020-Artifact \"$ARTIFACT_DIR\"" >&2
 	exit 1
 fi
 

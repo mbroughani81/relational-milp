@@ -1,6 +1,6 @@
 """Knowledge-distillation teacher/student equivalence benchmark suite.
 
-Loads frozen teacher/student ``.nnet`` pairs from ``data/distillation/mnist/<pair>/``
+Loads frozen teacher/student ``.nnet`` pairs from ``$RUNTIME_DIR/data/distillation/mnist/<pair>/``
 and builds the same 100 ReluDiff MNIST centers used by ``mnist_reludiff``.
 
 Property A (v1): ``|z_T(x)_c - z_S(x)_c| <= epsilon`` for the labeled class ``c``.
@@ -20,6 +20,7 @@ from benchmarks.common import (
     SuiteOptions,
 )
 from nn_equivalence.nn_types import NeuralNetwork
+from nn_equivalence.paths import runtime_path
 from nn_equivalence.reludiff_nnet import load_nnet_layers, load_reludiff_mnist_tests
 
 DEFAULT_SUITE_OPTIONS: SuiteOptions = {
@@ -29,8 +30,9 @@ DEFAULT_SUITE_OPTIONS: SuiteOptions = {
     "epsilon": "0.1",
     "perturb": "3.0",
     "timeout": "30",
-    "data_dir": "data/distillation/mnist",
-    "tests_path": "data/reludiff_mnist/mnist_tests.h",
+    # Empty -> resolved lazily from $RUNTIME_DIR in load_suite (see below).
+    "data_dir": "",
+    "tests_path": "",
 }
 
 
@@ -231,7 +233,10 @@ def load_suite(suite_options: SuiteOptions | None = None) -> InstanceSuite:
     options = _normalized_options(suite_options)
     print(f"{suite_name} suite options: {options}", file=sys.stderr)
 
-    pair_ids = _resolve_pair_ids(options, data_dir := Path(options["data_dir"]))
+    data_dir = Path(options["data_dir"]) if options["data_dir"] else runtime_path(
+        "data/distillation/mnist"
+    )
+    pair_ids = _resolve_pair_ids(options, data_dir)
     if not pair_ids:
         raise ValueError("distillation suite selected no pairs (check pairs=/tiers=)")
 
@@ -242,7 +247,9 @@ def load_suite(suite_options: SuiteOptions | None = None) -> InstanceSuite:
     if not modes:
         raise ValueError("distillation suite requires at least one mode")
 
-    tests_path = Path(options["tests_path"])
+    tests_path = Path(options["tests_path"]) if options["tests_path"] else runtime_path(
+        "data/reludiff_mnist/mnist_tests.h"
+    )
     if not tests_path.exists():
         raise FileNotFoundError(
             f"missing ReluDiff MNIST tests at {tests_path}; needed for the "

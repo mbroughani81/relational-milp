@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from benchmarks.mnist_reludiff import load_suite
+from nn_equivalence.paths import runtime_path
 from nn_equivalence.reludiff_nnet import (
     MNIST_RELUDIFF_ARCHITECTURES,
     network_architecture,
@@ -12,7 +13,7 @@ from nn_equivalence.reludiff_nnet import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = REPO_ROOT / "data" / "reludiff_mnist"
+DATA_DIR = runtime_path("data/reludiff_mnist")
 # The 3x100 network is the smallest bundled .nnet, so it loads quickly.
 NETWORK = "mnist_relu_3_100"
 
@@ -20,7 +21,7 @@ requires_data = pytest.mark.skipif(
     not (DATA_DIR / f"{NETWORK}.nnet").exists()
     or not (DATA_DIR / "mnist_tests.h").exists(),
     reason=(
-        "ReluDiff MNIST data not present under data/reludiff_mnist; "
+        "ReluDiff MNIST data not present under runtime/data/reludiff_mnist; "
         "download the .nnet fixtures to run this test"
     ),
 )
@@ -47,7 +48,7 @@ def _weight_zeros(network) -> int:
 
 @pytest.fixture
 def suite(monkeypatch):
-    # load_suite reads data/reludiff_mnist relative to the cwd.
+    # load_suite reads $RUNTIME_DIR/data/reludiff_mnist (set by tests/conftest.py).
     monkeypatch.chdir(REPO_ROOT)
     return load_suite(
         {

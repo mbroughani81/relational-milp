@@ -24,6 +24,7 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 
 from nn_equivalence.nn_types import NeuralNetwork
+from nn_equivalence.paths import runtime_path
 from nn_equivalence.reludiff_nnet import (
     load_reludiff_mnist_tests,
     network_architecture,
@@ -466,17 +467,19 @@ def parse_args() -> argparse.Namespace:
         help="Optional architecture/hyperparameter preset. Defaults to --pair-id "
         "when that id is a known preset.",
     )
-    parser.add_argument("--data-dir", type=Path, default=Path("data"))
+    # These default (when unset) to paths under $RUNTIME_DIR, resolved in main()
+    # so --help works without RUNTIME_DIR being set.
+    parser.add_argument("--data-dir", type=Path, default=None)
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=Path("data/distillation/mnist"),
-        help="Parent directory for pair folders.",
+        default=None,
+        help="Parent directory for pair folders (default: $RUNTIME_DIR/data/distillation/mnist).",
     )
     parser.add_argument(
         "--reludiff-tests",
         type=Path,
-        default=Path("data/reludiff_mnist/mnist_tests.h"),
+        default=None,
         help="ReluDiff 100-image fixture used for logit-gap characterization.",
     )
     parser.add_argument("--teacher-hidden", type=parse_hidden_sizes, default=None)
@@ -556,6 +559,14 @@ def main() -> None:
     args = parse_args()
     if args.teacher_epochs < 1 or args.student_epochs < 1:
         raise SystemExit("epoch counts must be at least 1")
+
+    # Fill runtime-relative defaults now (fails fast if RUNTIME_DIR is unset).
+    if args.data_dir is None:
+        args.data_dir = runtime_path("data")
+    if args.output_root is None:
+        args.output_root = runtime_path("data/distillation/mnist")
+    if args.reludiff_tests is None:
+        args.reludiff_tests = runtime_path("data/reludiff_mnist/mnist_tests.h")
 
     config = resolve_config(args)
     output_dir = args.output_root / args.pair_id

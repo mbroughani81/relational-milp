@@ -43,14 +43,12 @@ from benchmarks.common import (
     print_progress,
     validate_instance,
 )
+from nn_equivalence.paths import runtime_path
 from nn_equivalence.reludiff_nnet import network_architecture, write_nnet_layers
-
-ARTIFACT_ROOT = Path("artifacts/diffverifier")
-DEFAULT_DATA_DIR = Path("data/reludiff_mnist")
 MNIST_PROPERTY_BASE = 400
 # The mnist_reludiff three_pixel mode opens exactly the first three random_pixels
 # (see _three_pixel_region), matching the tool's `-x 3` pixel experiment. This
-# only holds while data/reludiff_mnist/mnist_tests.h carries the same
+# only holds while runtime/data/reludiff_mnist/mnist_tests.h carries the same
 # random_pixels table as the compiled ASE-2020 artifact; the ReluDiff ICSE
 # table differs and silently makes the verifier families check different
 # regions.
@@ -168,7 +166,7 @@ def nnet2_path_for(
     ReluDiff/NeuroDiff require identical architectures. For ``mnist_reludiff``
     the second network is a same-arch transform of the base ``.nnet``. For
     Tier A ``distillation`` pairs the teacher ``.nnet`` is the header source and
-    the student weights are rewritten next to it under ``data/``.
+    the student weights are rewritten next to it under ``runtime/data/``.
     """
     if instance.suite_name == "distillation":
         return _distillation_nnet_paths(instance, cache)
@@ -218,7 +216,7 @@ def _distillation_nnet_paths(
     if isinstance(nnet1_meta, str):
         nnet1_path = Path(nnet1_meta)
     else:
-        nnet1_path = Path("data/distillation/mnist") / pair_id / "teacher.nnet"
+        nnet1_path = runtime_path("data/distillation/mnist", pair_id, "teacher.nnet")
     if not nnet1_path.exists():
         raise FileNotFoundError(
             f"distillation teacher .nnet not found: {nnet1_path}. Train with "
@@ -227,7 +225,7 @@ def _distillation_nnet_paths(
 
     if pair_id not in cache:
         # Write the diffverifier-ready student (teacher header + student
-        # weights) next to the teacher under data/, not into artifacts/.
+        # weights) next to the teacher under runtime/data/, not into runtime/artifacts/.
         nnet2_path = nnet1_path.parent / f"{pair_id}__student.nnet"
         write_nnet_layers(nnet1_path, instance.nn2, nnet2_path)
         cache[pair_id] = nnet2_path
@@ -363,7 +361,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Base network directory for mnist_reludiff "
-        "(default: data/reludiff_mnist). Ignored for distillation, which uses "
+        "(default: $RUNTIME_DIR/data/reludiff_mnist). Ignored for distillation, which uses "
         "each instance's teacher .nnet path.",
     )
     parser.add_argument("--csv", type=Path, default=None)
@@ -380,7 +378,7 @@ def main() -> None:
             "by ReluDiff/NeuroDiff — use Tier A same-arch pairs."
         )
     binary = resolve_binary(args)
-    data_dir = args.data_dir or DEFAULT_DATA_DIR
+    data_dir = args.data_dir or runtime_path("data/reludiff_mnist")
     try:
         suite_options = parse_suite_options(args.suite_options)
         suite = load_suite(args.suite, suite_options)
@@ -392,8 +390,8 @@ def main() -> None:
         validate_instance(instance)
 
     # Only mnist_reludiff serializes its second network into a work dir; the
-    # distillation suite writes next to the teacher under data/ instead.
-    work_dir = (ARTIFACT_ROOT / suite.name / args.tool).resolve()
+    # distillation suite writes next to the teacher under runtime/data/ instead.
+    work_dir = (runtime_path("artifacts/diffverifier") / suite.name / args.tool).resolve()
     if suite.name != "distillation":
         work_dir.mkdir(parents=True, exist_ok=True)
 
