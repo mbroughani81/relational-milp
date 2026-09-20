@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-from dataclasses import dataclass
 import io
 import sys
 
@@ -10,11 +9,7 @@ from torch import nn
 
 from nn_equivalence.nn_types import Bounds, NeuralNetwork
 
-
-@dataclass
-class ABCrownBoundOptions:
-    timeout_sec: float
-    method: str = "CROWN-Optimized"
+DEFAULT_BOUND_METHOD = "CROWN-Optimized"
 
 
 class PrefixPreActivationNetwork(nn.Module):
@@ -69,7 +64,7 @@ def compute_layer_bounds(
     network: NeuralNetwork,
     input_bounds: Bounds,
     target_layer_index: int,
-    options: ABCrownBoundOptions,
+    method: str = DEFAULT_BOUND_METHOD,
 ) -> Bounds:
     if target_layer_index == 0:
         weights, bias = network[0]
@@ -99,7 +94,7 @@ def compute_layer_bounds(
         bounded_input = BoundedTensor(dummy_input, perturbation)
         lower_tensor, upper_tensor = bounded_model.compute_bounds(
             x=(bounded_input,),
-            method=options.method,
+            method=method,
         )
 
     if not bool(torch.all(torch.isfinite(lower_tensor))):
@@ -124,7 +119,7 @@ def compute_layer_bounds(
 def compute_network_bounds(
     network: NeuralNetwork,
     input_bounds: Bounds,
-    options: ABCrownBoundOptions,
+    method: str = DEFAULT_BOUND_METHOD,
 ) -> list[Bounds] | None:
     bounds: list[Bounds] = []
     current_bounds = input_bounds
@@ -138,7 +133,7 @@ def compute_network_bounds(
                     network,
                     input_bounds,
                     layer_index,
-                    options,
+                    method,
                 )
             except Exception as error:
                 print(

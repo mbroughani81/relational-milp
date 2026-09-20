@@ -17,10 +17,7 @@ from pyomo.opt import TerminationCondition as TC
 from pyomo.repn import generate_standard_repn
 
 import nn_equivalence.encoder_pyomo as encoder
-from benchmarks.abcrown_bounds import (
-    ABCrownBoundOptions,
-    compute_network_bounds,
-)
+from benchmarks.abcrown_bounds import compute_network_bounds
 from benchmarks.cplex_log import CplexPresolveLogStats, parse_cplex_presolve_log
 from benchmarks.common import (
     Hyperrectangle,
@@ -729,13 +726,10 @@ def compute_bounds(
     if bound_tightening != "abcrown":
         raise ValueError(f"unsupported bound tightening mode: {bound_tightening}")
 
-    options = ABCrownBoundOptions(timeout_sec=instance.timeout_sec)
-
     nn1_start = time.perf_counter()
     nn1_abcrown_bounds = compute_network_bounds(
         instance.nn1,
         input_bounds,
-        options,
     )
     nn1_bounds = compute_interval_bounds(
         instance.nn1,
@@ -748,7 +742,6 @@ def compute_bounds(
     nn2_abcrown_bounds = compute_network_bounds(
         instance.nn2,
         input_bounds,
-        options,
     )
     nn2_bounds = compute_interval_bounds(
         instance.nn2,
