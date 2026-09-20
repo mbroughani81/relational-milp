@@ -145,7 +145,7 @@ class SafetyMarginNetwork(nn.Module):
 
 
 def load_suite(name: str, suite_options: SuiteOptions) -> InstanceSuite:
-    module = importlib.import_module(f"benchmarks.{name}")
+    module = importlib.import_module(f"benchmarks.suites.{name}")
     return module.load_suite(suite_options)
 
 
@@ -153,7 +153,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run an NN equivalence instance suite with alpha-beta-CROWN."
     )
-    parser.add_argument("--suite", default="mnist_reludiff")
+    parser.add_argument("--suite", default="pruning_mnist")
     parser.add_argument(
         "--suite-options",
         action="append",

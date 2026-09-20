@@ -46,15 +46,15 @@ from benchmarks.common import (
 from nn_equivalence.paths import runtime_path
 from nn_equivalence.reludiff_nnet import network_architecture, write_nnet_layers
 MNIST_PROPERTY_BASE = 400
-# The mnist_reludiff three_pixel mode opens exactly the first three random_pixels
+# The pruning_mnist three_pixel mode opens exactly the first three random_pixels
 # (see _three_pixel_region), matching the tool's `-x 3` pixel experiment. This
 # only holds while runtime/data/reludiff_mnist/mnist_tests.h carries the same
 # random_pixels table as the compiled ASE-2020 artifact; the ReluDiff ICSE
 # table differs and silently makes the verifier families check different
 # regions.
 THREE_PIXEL_COUNT = 3
-SUPPORTED_SUITES = frozenset({"mnist_reludiff", "distillation"})
-DEFAULT_SUITE = "mnist_reludiff"
+SUPPORTED_SUITES = frozenset({"pruning_mnist", "distillation_mnist"})
+DEFAULT_SUITE = "pruning_mnist"
 
 
 def build_command(
@@ -135,7 +135,7 @@ def property_id_for(instance: Instance) -> int:
 
 
 def load_suite(name: str, suite_options: SuiteOptions) -> InstanceSuite:
-    module = importlib.import_module(f"benchmarks.{name}")
+    module = importlib.import_module(f"benchmarks.suites.{name}")
     return module.load_suite(suite_options)
 
 
@@ -163,12 +163,12 @@ def nnet2_path_for(
 ) -> tuple[Path, Path]:
     """Return (nnet1_source_path, nnet2_serialized_path) for an instance.
 
-    ReluDiff/NeuroDiff require identical architectures. For ``mnist_reludiff``
+    ReluDiff/NeuroDiff require identical architectures. For ``pruning_mnist``
     the second network is a same-arch transform of the base ``.nnet``. For
     Tier A ``distillation`` pairs the teacher ``.nnet`` is the header source and
     the student weights are rewritten next to it under ``runtime/data/``.
     """
-    if instance.suite_name == "distillation":
+    if instance.suite_name == "distillation_mnist":
         return _distillation_nnet_paths(instance, cache)
 
     network = instance.metadata.get("network")
@@ -242,9 +242,9 @@ def run_instance(
 ) -> InstanceResult:
     nnet1_path, nnet2_path = nnet2_path_for(instance, data_dir, work_dir, cache)
     mode = str(instance.metadata.get("input_mode", "global"))
-    # For global mode metadata["perturb"] is the numeric strength; for three_pixel
-    # it holds the perturbed pixel ids (unused by the tool's -x path).
-    perturb = float(instance.metadata["perturb"]) if mode == "global" else 0.0
+    # For global mode metadata["radius"] is the numeric L-inf radius; for
+    # three_pixel it holds the perturbed pixel ids (unused by the tool's -x path).
+    radius = float(instance.metadata["radius"]) if mode == "global" else 0.0
     command = build_command(
         binary,
         property_id_for(instance),
@@ -252,7 +252,7 @@ def run_instance(
         nnet2_path,
         instance.epsilon,
         mode,
-        perturb,
+        radius,
     )
 
     start_time = time.perf_counter()
@@ -360,7 +360,7 @@ def parse_args() -> argparse.Namespace:
         "--data-dir",
         type=Path,
         default=None,
-        help="Base network directory for mnist_reludiff "
+        help="Base network directory for pruning_mnist "
         "(default: $RUNTIME_DIR/data/reludiff_mnist). Ignored for distillation, which uses "
         "each instance's teacher .nnet path.",
     )
@@ -389,10 +389,10 @@ def main() -> None:
     for instance in suite.instances:
         validate_instance(instance)
 
-    # Only mnist_reludiff serializes its second network into a work dir; the
-    # distillation suite writes next to the teacher under runtime/data/ instead.
+    # Only pruning_mnist serializes its second network into a work dir; the
+    # distillation_mnist suite writes next to the teacher under runtime/data/ instead.
     work_dir = (runtime_path("artifacts/diffverifier") / suite.name / args.tool).resolve()
-    if suite.name != "distillation":
+    if suite.name != "distillation_mnist":
         work_dir.mkdir(parents=True, exist_ok=True)
 
     cache: dict[str, Path] = {}

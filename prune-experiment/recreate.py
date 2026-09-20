@@ -56,7 +56,7 @@ TIMEOUT = 60
 
 # Fixed verifier parameters, held constant across the sweep.
 EPSILON = "1.0"
-PERTURB = "3"
+RADIUS = "3"  # +/- radius/255 per pixel, global-mode input region
 CROWN_PROFILE = "relu-kfsb"
 
 
@@ -81,12 +81,11 @@ def iter_cells():
 def _common_opts(arch: str, mode: str, rate: int) -> list[str]:
     sparsity = f"{rate / 100:.4f}"
     return [
-        "--suite", "mnist_reludiff",
+        "--suite", "pruning_mnist",
         "--suite-options", f"networks={arch}",
         "--suite-options", f"modes={mode}",
-        "--suite-options", "perturbation=prune",
         "--suite-options", f"sparsity={sparsity}",
-        "--suite-options", f"perturb={PERTURB}",
+        "--suite-options", f"radius={RADIUS}",
         "--suite-options", f"epsilon={EPSILON}",
         "--suite-options", f"limit={LIMIT}",
         "--suite-options", f"timeout={TIMEOUT}",

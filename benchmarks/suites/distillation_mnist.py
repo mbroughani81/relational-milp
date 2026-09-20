@@ -1,7 +1,7 @@
 """Knowledge-distillation teacher/student equivalence benchmark suite.
 
 Loads frozen teacher/student ``.nnet`` pairs from ``$RUNTIME_DIR/data/distillation/mnist/<pair>/``
-and builds the same 100 ReluDiff MNIST centers used by ``mnist_reludiff``.
+and builds the same 100 ReluDiff MNIST centers used by ``pruning_mnist``.
 
 Property A (v1): ``|z_T(x)_c - z_S(x)_c| <= epsilon`` for the labeled class ``c``.
 """
@@ -28,7 +28,7 @@ DEFAULT_SUITE_OPTIONS: SuiteOptions = {
     "tiers": "",
     "modes": "three_pixel",
     "epsilon": "0.1",
-    "perturb": "3.0",
+    "radius": "3.0",
     "timeout": "30",
     # Empty -> resolved lazily from $RUNTIME_DIR in load_suite (see below).
     "data_dir": "",
@@ -49,14 +49,14 @@ def _normalized_options(suite_options: SuiteOptions | None) -> SuiteOptions:
         "limit",
         "timeout",
         "epsilon",
-        "perturb",
+        "radius",
         "data_dir",
         "tests_path",
     }
     unknown_options = set(options) - allowed_options
     if unknown_options:
         raise ValueError(
-            f"unknown distillation suite options: {sorted(unknown_options)}"
+            f"unknown distillation_mnist suite options: {sorted(unknown_options)}"
         )
     return options
 
@@ -74,7 +74,7 @@ def _limit(options: SuiteOptions) -> int | None:
         return None
     limit = int(value)
     if limit < 1 or limit > 100:
-        raise ValueError("distillation limit must be between 1 and 100")
+        raise ValueError("distillation_mnist limit must be between 1 and 100")
     return limit
 
 
@@ -86,14 +86,14 @@ def _epsilon(options: SuiteOptions) -> float:
     return float(options["epsilon"])
 
 
-def _perturb(options: SuiteOptions) -> float:
-    return float(options["perturb"])
+def _radius(options: SuiteOptions) -> float:
+    return float(options["radius"])
 
 
-def _global_region(raw_pixels: list[float], perturb: float) -> AbstractPolytope:
+def _global_region(raw_pixels: list[float], radius: float) -> AbstractPolytope:
     return Hyperrectangle(
-        low=[max((pixel - perturb) / 255.0, 0.0) for pixel in raw_pixels],
-        high=[min((pixel + perturb) / 255.0, 1.0) for pixel in raw_pixels],
+        low=[max((pixel - radius) / 255.0, 0.0) for pixel in raw_pixels],
+        high=[min((pixel + radius) / 255.0, 1.0) for pixel in raw_pixels],
     )
 
 
@@ -188,7 +188,7 @@ def _resolve_pair_ids(options: SuiteOptions, data_dir: Path) -> tuple[str, ...]:
         raise ValueError(f"unknown distillation tiers: {sorted(unknown_tiers)}")
 
     if not pair_ids and not tier_filter:
-        raise ValueError("distillation suite requires pairs= and/or tiers=")
+        raise ValueError("distillation_mnist suite requires pairs= and/or tiers=")
 
     if not pair_ids:
         # Discover pair directories under data_dir.
@@ -229,7 +229,7 @@ def _resolve_pair_ids(options: SuiteOptions, data_dir: Path) -> tuple[str, ...]:
 
 
 def load_suite(suite_options: SuiteOptions | None = None) -> InstanceSuite:
-    suite_name = "distillation"
+    suite_name = "distillation_mnist"
     options = _normalized_options(suite_options)
     print(f"{suite_name} suite options: {options}", file=sys.stderr)
 
@@ -238,14 +238,16 @@ def load_suite(suite_options: SuiteOptions | None = None) -> InstanceSuite:
     )
     pair_ids = _resolve_pair_ids(options, data_dir)
     if not pair_ids:
-        raise ValueError("distillation suite selected no pairs (check pairs=/tiers=)")
+        raise ValueError(
+            "distillation_mnist suite selected no pairs (check pairs=/tiers=)"
+        )
 
     modes = _option_tuple(options, "modes")
     unknown_modes = set(modes) - {"global", "three_pixel"}
     if unknown_modes:
-        raise ValueError(f"unknown distillation modes: {sorted(unknown_modes)}")
+        raise ValueError(f"unknown distillation_mnist modes: {sorted(unknown_modes)}")
     if not modes:
-        raise ValueError("distillation suite requires at least one mode")
+        raise ValueError("distillation_mnist suite requires at least one mode")
 
     tests_path = Path(options["tests_path"]) if options["tests_path"] else runtime_path(
         "data/reludiff_mnist/mnist_tests.h"
@@ -261,7 +263,7 @@ def load_suite(suite_options: SuiteOptions | None = None) -> InstanceSuite:
     sample_indices = range(100 if limit is None else limit)
     timeout_sec = _timeout(options)
     epsilon = _epsilon(options)
-    perturb = _perturb(options)
+    radius = _radius(options)
 
     instances: list[Instance] = []
     for pair_id in pair_ids:
@@ -276,13 +278,13 @@ def load_suite(suite_options: SuiteOptions | None = None) -> InstanceSuite:
             for sample_index in sample_indices:
                 raw_pixels = mnist_tests[sample_index]
                 if mode == "global":
-                    input_region = _global_region(raw_pixels, perturb)
-                    perturb_metadata: str | float = perturb
+                    input_region = _global_region(raw_pixels, radius)
+                    radius_metadata: str | float = radius
                 else:
                     input_region = _three_pixel_region(
                         raw_pixels, random_pixels[sample_index]
                     )
-                    perturb_metadata = ",".join(
+                    radius_metadata = ",".join(
                         str(pixel_id) for pixel_id in random_pixels[sample_index][:3]
                     )
 
@@ -304,7 +306,7 @@ def load_suite(suite_options: SuiteOptions | None = None) -> InstanceSuite:
                             "correct_class": labels[sample_index],
                             "output_index": labels[sample_index],
                             "input_mode": mode,
-                            "perturb": perturb_metadata,
+                            "radius": radius_metadata,
                             "property": "output_equivalence_logits",
                             # Used by run_diffverifier for Tier A same-arch pairs.
                             "nnet1_path": teacher_nnet,

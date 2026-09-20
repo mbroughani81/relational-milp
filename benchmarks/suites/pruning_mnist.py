@@ -15,7 +15,6 @@ from nn_equivalence.reludiff_nnet import (
     load_nnet_layers,
     load_reludiff_mnist_tests,
     prune_network_unstructured,
-    quantize_network_float16,
     validate_mnist_reludiff_network,
 )
 from nn_equivalence.nn_types import NeuralNetwork
@@ -23,9 +22,8 @@ from nn_equivalence.paths import runtime_path
 
 DEFAULT_SUITE_OPTIONS: SuiteOptions = {
     "epsilon": "1.0",
-    "perturb": "3.0",
+    "radius": "3.0",
     "timeout": "5",
-    "perturbation": "quantize",
     "sparsity": "0.5",
 }
 
@@ -42,14 +40,13 @@ def _normalized_options(suite_options: SuiteOptions | None) -> SuiteOptions:
         "limit",
         "timeout",
         "epsilon",
-        "perturb",
-        "perturbation",
+        "radius",
         "sparsity",
     }
     unknown_options = set(options) - allowed_options
     if unknown_options:
         raise ValueError(
-            f"unknown mnist_reludiff suite options: {sorted(unknown_options)}"
+            f"unknown pruning_mnist suite options: {sorted(unknown_options)}"
         )
     return options
 
@@ -67,7 +64,7 @@ def _limit(options: SuiteOptions) -> int | None:
         return None
     limit = int(value)
     if limit < 1 or limit > 100:
-        raise ValueError("mnist_reludiff limit must be between 1 and 100")
+        raise ValueError("pruning_mnist limit must be between 1 and 100")
     return limit
 
 
@@ -79,24 +76,14 @@ def _epsilon(options: SuiteOptions) -> float:
     return float(options["epsilon"])
 
 
-def _perturb(options: SuiteOptions) -> float:
-    return float(options["perturb"])
-
-
-def _perturbation(options: SuiteOptions) -> str:
-    value = options["perturbation"].strip().lower()
-    if value not in {"quantize", "prune"}:
-        raise ValueError(
-            "mnist_reludiff perturbation must be 'quantize' or 'prune', "
-            f"got {options['perturbation']!r}"
-        )
-    return value
+def _radius(options: SuiteOptions) -> float:
+    return float(options["radius"])
 
 
 def _sparsity(options: SuiteOptions) -> float:
     sparsity = float(options["sparsity"])
     if not 0.0 <= sparsity < 1.0:
-        raise ValueError("mnist_reludiff sparsity must be in [0.0, 1.0)")
+        raise ValueError("pruning_mnist sparsity must be in [0.0, 1.0)")
     return sparsity
 
 
@@ -106,10 +93,10 @@ def _validate_network_names(network_names: tuple[str, ...]) -> None:
             raise ValueError(f"unknown ReluDiff MNIST network: {network_name}")
 
 
-def _global_region(raw_pixels: list[float], perturb: float) -> AbstractPolytope:
+def _global_region(raw_pixels: list[float], radius: float) -> AbstractPolytope:
     return Hyperrectangle(
-        low=[max((pixel - perturb) / 255.0, 0.0) for pixel in raw_pixels],
-        high=[min((pixel + perturb) / 255.0, 1.0) for pixel in raw_pixels],
+        low=[max((pixel - radius) / 255.0, 0.0) for pixel in raw_pixels],
+        high=[min((pixel + radius) / 255.0, 1.0) for pixel in raw_pixels],
     )
 
 
@@ -122,20 +109,9 @@ def _three_pixel_region(raw_pixels: list[float], pixel_ids: list[int]) -> Abstra
     return Hyperrectangle(low=lower_bounds, high=upper_bounds)
 
 
-def _make_second_network(
-    original: NeuralNetwork,
-    perturbation: str,
-    sparsity: float,
-) -> NeuralNetwork:
-    if perturbation == "prune":
-        return prune_network_unstructured(original, sparsity)
-    return quantize_network_float16(original)
-
-
 def _load_network_pairs(
     data_dir: Path,
     network_names: tuple[str, ...],
-    perturbation: str,
     sparsity: float,
 ) -> dict[str, tuple[NeuralNetwork, NeuralNetwork]]:
     pairs: dict[str, tuple[NeuralNetwork, NeuralNetwork]] = {}
@@ -147,8 +123,8 @@ def _load_network_pairs(
             original,
             source_path=network_path,
         )
-        second = _make_second_network(original, perturbation, sparsity)
-        pairs[network_name] = (original, second)
+        pruned = prune_network_unstructured(original, sparsity)
+        pairs[network_name] = (original, pruned)
     return pairs
 
 
@@ -165,7 +141,7 @@ def _require_data(data_dir: Path, network_names: tuple[str, ...]) -> None:
 
 
 def load_suite(suite_options: SuiteOptions | None = None) -> InstanceSuite:
-    suite_name = "mnist_reludiff"
+    suite_name = "pruning_mnist"
     options = _normalized_options(suite_options)
     print(f"{suite_name} suite options: {options}", file=sys.stderr)
     data_dir = runtime_path("data/reludiff_mnist")
@@ -180,40 +156,29 @@ def load_suite(suite_options: SuiteOptions | None = None) -> InstanceSuite:
     modes = _option_tuple(options, "modes")
     unknown_modes = set(modes) - {"global", "three_pixel"}
     if unknown_modes:
-        raise ValueError(f"unknown mnist_reludiff modes: {sorted(unknown_modes)}")
+        raise ValueError(f"unknown pruning_mnist modes: {sorted(unknown_modes)}")
 
     limit = _limit(options)
     sample_indices = range(100 if limit is None else limit)
     timeout_sec = _timeout(options)
     epsilon = _epsilon(options)
-    perturb = _perturb(options)
-    perturbation = _perturbation(options)
+    radius = _radius(options)
     sparsity = _sparsity(options)
-    network_pairs = _load_network_pairs(
-        data_dir, network_names, perturbation, sparsity
-    )
-
-    if perturbation == "prune":
-        transform_metadata = {"perturbation": "prune", "sparsity": sparsity}
-    else:
-        transform_metadata = {
-            "perturbation": "quantize",
-            "quantization": "float32_to_float16",
-        }
+    network_pairs = _load_network_pairs(data_dir, network_names, sparsity)
 
     instances: list[Instance] = []
-    for network_name, (original, second) in network_pairs.items():
+    for network_name, (original, pruned) in network_pairs.items():
         for mode in modes:
             for sample_index in sample_indices:
                 raw_pixels = mnist_tests[sample_index]
                 if mode == "global":
-                    input_region = _global_region(raw_pixels, perturb)
-                    perturb_metadata = perturb
+                    input_region = _global_region(raw_pixels, radius)
+                    radius_metadata: str | float = radius
                 else:
                     input_region = _three_pixel_region(
                         raw_pixels, random_pixels[sample_index]
                     )
-                    perturb_metadata = ",".join(
+                    radius_metadata = ",".join(
                         str(pixel_id) for pixel_id in random_pixels[sample_index][:3]
                     )
 
@@ -222,7 +187,7 @@ def load_suite(suite_options: SuiteOptions | None = None) -> InstanceSuite:
                         instance_id=f"{network_name}_{mode}_{sample_index}",
                         suite_name=suite_name,
                         nn1=original,
-                        nn2=second,
+                        nn2=pruned,
                         input_region=input_region,
                         epsilon=epsilon,
                         output_index=labels[sample_index],
@@ -234,8 +199,9 @@ def load_suite(suite_options: SuiteOptions | None = None) -> InstanceSuite:
                             "correct_class": labels[sample_index],
                             "output_index": labels[sample_index],
                             "input_mode": mode,
-                            "perturb": perturb_metadata,
-                            **transform_metadata,
+                            "radius": radius_metadata,
+                            "perturbation": "prune",
+                            "sparsity": sparsity,
                         },
                     )
                 )

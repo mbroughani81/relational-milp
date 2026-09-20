@@ -6,7 +6,8 @@ from pathlib import Path
 import pytest
 
 from benchmarks.common import Hyperrectangle, Instance, validate_instance
-from benchmarks.distillation import load_suite
+from benchmarks.suites.distillation_mnist import load_suite
+from nn_equivalence.paths import runtime_path
 from nn_equivalence.reludiff_nnet import (
     load_nnet_layers,
     network_architecture,
@@ -14,8 +15,8 @@ from nn_equivalence.reludiff_nnet import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = REPO_ROOT / "data" / "distillation" / "mnist"
-TESTS_PATH = REPO_ROOT / "data" / "reludiff_mnist" / "mnist_tests.h"
+DATA_DIR = runtime_path("data/distillation/mnist")
+TESTS_PATH = runtime_path("data/reludiff_mnist/mnist_tests.h")
 PAIR = "kd_1"
 
 requires_pair = pytest.mark.skipif(
@@ -126,7 +127,7 @@ def test_distillation_suite_loads_from_fixture_pair(tmp_path: Path, monkeypatch)
             "tests_path": str(TESTS_PATH),
         }
     )
-    assert suite.name == "distillation"
+    assert suite.name == "distillation_mnist"
     assert len(suite.instances) == 2
     for sample_index, instance in enumerate(suite.instances):
         assert instance.instance_id == f"kd_toy_three_pixel_{sample_index}"

@@ -204,8 +204,8 @@ arguments. For example, to run a small ReluDiff MNIST subset:
 
 ```bash
 python3 -m benchmarks.run_pyomo \
-  --suite mnist_reludiff \
-  --solver highs \
+  --suite pruning_mnist \
+  --solver cplex \
   --suite-options networks=mnist_relu_3_100 \
   --suite-options modes=global,three_pixel \
   --suite-options limit=3 \
@@ -213,7 +213,7 @@ python3 -m benchmarks.run_pyomo \
 ```
 
 Run ReluDiff / NeuroDiff (the `delta_network_test` C verifiers) on the same
-`mnist_reludiff` instances as the MILP and CROWN runners:
+`pruning_mnist` instances as the MILP and CROWN runners:
 
 ```bash
 python3 -m benchmarks.run_diffverifier \
@@ -221,7 +221,6 @@ python3 -m benchmarks.run_diffverifier \
   --binary /path/to/delta_network_test \
   --suite-options networks=mnist_relu_3_100 \
   --suite-options modes=global \
-  --suite-options perturbation=prune \
   --suite-options sparsity=0.3 \
   --suite-options limit=100 \
   --suite-options timeout=60
@@ -251,7 +250,7 @@ presolve pass:
 
 ```bash
 python3 -m benchmarks.run_pyomo \
-  --suite mnist_reludiff \
+  --suite pruning_mnist \
   --solver cplex \
   --debug-out runtime/artifacts/cplex_debug.json \
   --suite-options networks=mnist_relu_3_100 \
@@ -279,16 +278,15 @@ python3 -m benchmarks.run_pyomo \
 
 ## Current benchmark suites
 
-- `mnist_reludiff`: compares the original ReluDiff `.nnet` MNIST models with a
-  float16-quantized or magnitude-pruned copy of the *same* architecture. For
-  image label `c`, each instance verifies `|nn1(x)[c] - nn2(x)[c]| <= epsilon`.
-  Supports `networks`, `modes`, `limit`, `timeout`, `epsilon`, `perturb`,
-  `perturbation`, and `sparsity` suite options.
-- `distillation`: Hinton-style knowledge-distillation teacher/student pairs.
-  Property A is numerical logit equivalence on the labeled class:
+- `pruning_mnist`: compares the original ReluDiff `.nnet` MNIST models with a
+  magnitude-pruned copy of the *same* architecture. For image label `c`, each
+  instance verifies `|nn1(x)[c] - nn2(x)[c]| <= epsilon`. Supports `networks`,
+  `modes`, `limit`, `timeout`, `epsilon`, `radius`, and `sparsity` suite options.
+- `distillation_mnist`: Hinton-style knowledge-distillation teacher/student
+  pairs. Property A is numerical logit equivalence on the labeled class:
   `|z_T(x)[c] - z_S(x)[c]| <= epsilon`. Uses the same ReluDiff 100-image /
-  3-pixel fixtures as `mnist_reludiff`. Supports `pairs`, `tiers`, `modes`,
-  `limit`, `timeout`, `epsilon`, and `perturb`.
+  3-pixel fixtures as `pruning_mnist`. Supports `pairs`, `tiers`, `modes`,
+  `limit`, `timeout`, `epsilon`, and `radius`.
 
   Two experimental tiers:
 

@@ -32,7 +32,7 @@ def _instance(metadata: dict) -> Instance:
     net = [([[1.0, 2.0]], [0.0])]
     return Instance(
         instance_id="x",
-        suite_name="mnist_reludiff",
+        suite_name="pruning_mnist",
         nn1=net,
         nn2=net,
         input_region=Hyperrectangle(low=[0.0, 0.0], high=[1.0, 1.0]),
@@ -135,7 +135,7 @@ def test_distillation_nnet_paths_rejects_tier_b(tmp_path):
     student = [([[1.0, 0.0]], [0.0]), ([[1.0]], [0.0])]
     instance = Instance(
         instance_id="kd_1_three_pixel_0",
-        suite_name="distillation",
+        suite_name="distillation_mnist",
         nn1=teacher,
         nn2=student,
         input_region=Hyperrectangle(low=[0.0, 0.0], high=[1.0, 1.0]),
@@ -167,7 +167,7 @@ def test_distillation_nnet_paths_writes_same_arch_student(tmp_path):
     write_nnet_from_scratch(teacher, teacher_path)
     instance = Instance(
         instance_id="kd_a1_three_pixel_0",
-        suite_name="distillation",
+        suite_name="distillation_mnist",
         nn1=teacher,
         nn2=student,
         input_region=Hyperrectangle(low=[0.0, 0.0], high=[1.0, 1.0]),

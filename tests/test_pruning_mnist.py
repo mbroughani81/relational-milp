@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from benchmarks.mnist_reludiff import load_suite
+from benchmarks.suites.pruning_mnist import load_suite
 from nn_equivalence.paths import runtime_path
 from nn_equivalence.reludiff_nnet import (
     MNIST_RELUDIFF_ARCHITECTURES,
@@ -67,7 +67,6 @@ def pruned_suite(monkeypatch):
             "networks": NETWORK,
             "modes": "global",
             "limit": "3",
-            "perturbation": "prune",
             "sparsity": "0.5",
         }
     )
@@ -78,7 +77,7 @@ def test_load_suite_builds_expected_instances(suite):
     # limit=3, one network, one mode => three instances.
     assert len(suite.instances) == 3
     for sample_index, instance in enumerate(suite.instances):
-        assert instance.suite_name == "mnist_reludiff"
+        assert instance.suite_name == "pruning_mnist"
         assert instance.instance_id == f"{NETWORK}_global_{sample_index}"
 
 
@@ -86,24 +85,10 @@ def test_load_suite_builds_expected_instances(suite):
 def test_load_suite_networks_follow_expected_architecture(suite):
     expected = MNIST_RELUDIFF_ARCHITECTURES[NETWORK]
     for instance in suite.instances:
-        # Both the original and the quantized network must keep the exact
+        # Both the original and the pruned network must keep the exact
         # ReluDiff benchmark architecture.
         assert network_architecture(instance.nn1) == expected
         assert network_architecture(instance.nn2) == expected
-
-
-@requires_data
-def test_load_suite_quantizes_second_network_to_float16(suite):
-    for instance in suite.instances:
-        # nn2 is exactly the float16 quantization of nn1.
-        assert instance.nn2 == quantize_network_float16(instance.nn1)
-
-        # Quantization actually changed something: a trained float32 network
-        # is not already representable in half precision.
-        assert instance.nn1 != instance.nn2
-
-        # Every nn2 value is a genuine float16 value: re-quantizing is a no-op.
-        assert quantize_network_float16(instance.nn2) == instance.nn2
 
 
 def test_quantize_network_float16_rounds_to_half_precision():
