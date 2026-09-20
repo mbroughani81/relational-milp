@@ -147,7 +147,7 @@ def test_distillation_nnet_paths_rejects_tier_b(tmp_path):
         },
     )
     with pytest.raises(ValueError, match="Tier B"):
-        _distillation_nnet_paths(instance, tmp_path, {})
+        _distillation_nnet_paths(instance, {})
 
 
 def test_distillation_nnet_paths_writes_same_arch_student(tmp_path):
@@ -179,8 +179,8 @@ def test_distillation_nnet_paths_writes_same_arch_student(tmp_path):
             "sample_index": 0,
         },
     )
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-    nnet1, nnet2 = _distillation_nnet_paths(instance, work_dir, {})
+    nnet1, nnet2 = _distillation_nnet_paths(instance, {})
     assert nnet1 == teacher_path
+    # Generated student lands next to the teacher (under data/), not artifacts/.
+    assert nnet2.parent == teacher_path.parent
     assert load_nnet_layers(nnet2) == student

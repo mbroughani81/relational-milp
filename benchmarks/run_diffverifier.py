@@ -168,10 +168,10 @@ def nnet2_path_for(
     ReluDiff/NeuroDiff require identical architectures. For ``mnist_reludiff``
     the second network is a same-arch transform of the base ``.nnet``. For
     Tier A ``distillation`` pairs the teacher ``.nnet`` is the header source and
-    the student weights are rewritten into a sibling temp file.
+    the student weights are rewritten next to it under ``data/``.
     """
     if instance.suite_name == "distillation":
-        return _distillation_nnet_paths(instance, work_dir, cache)
+        return _distillation_nnet_paths(instance, cache)
 
     network = instance.metadata.get("network")
     if not isinstance(network, str):
@@ -193,7 +193,6 @@ def nnet2_path_for(
 
 def _distillation_nnet_paths(
     instance: Instance,
-    work_dir: Path,
     cache: dict[str, Path],
 ) -> tuple[Path, Path]:
     pair_id = instance.metadata.get("pair_id")
@@ -227,7 +226,9 @@ def _distillation_nnet_paths(
         )
 
     if pair_id not in cache:
-        nnet2_path = work_dir / f"{pair_id}__student.nnet"
+        # Write the diffverifier-ready student (teacher header + student
+        # weights) next to the teacher under data/, not into artifacts/.
+        nnet2_path = nnet1_path.parent / f"{pair_id}__student.nnet"
         write_nnet_layers(nnet1_path, instance.nn2, nnet2_path)
         cache[pair_id] = nnet2_path
     return nnet1_path, cache[pair_id]
@@ -390,8 +391,11 @@ def main() -> None:
     for instance in suite.instances:
         validate_instance(instance)
 
+    # Only mnist_reludiff serializes its second network into a work dir; the
+    # distillation suite writes next to the teacher under data/ instead.
     work_dir = (ARTIFACT_ROOT / suite.name / args.tool).resolve()
-    work_dir.mkdir(parents=True, exist_ok=True)
+    if suite.name != "distillation":
+        work_dir.mkdir(parents=True, exist_ok=True)
 
     cache: dict[str, Path] = {}
     results: list[InstanceResult] = []
