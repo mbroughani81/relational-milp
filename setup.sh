@@ -3,7 +3,7 @@
 # One-shot environment bootstrap for relational-milp.
 #
 # Goal: clone this repo on a fresh cluster node, run `./setup.sh`, and then
-# `prune-experiment/recreate.sh` (or distillation/recreate.sh) runs the
+# `prune-experiment/recreate.py` (or distillation/recreate.sh) runs the
 # benchmarks end to end.
 #
 # It provisions everything that can be automated:
@@ -353,8 +353,8 @@ summary() {
 	printf '  %-20s %s\n' "cplex (full CLI):"  "$have_cplex   (milp_abcrown)${cplex_cli:+ -> $cplex_cli}"
 	echo
 	echo "Next:"
-	echo "  ./prune-experiment/recreate.sh --light   # quick smoke run"
-	echo "  ./prune-experiment/recreate.sh           # full sweep"
+	echo "  ./prune-experiment/recreate.py --dry-run  # print the plan (JSON), run nothing"
+	echo "  ./prune-experiment/recreate.py            # run undone cells sequentially"
 }
 
 select_python

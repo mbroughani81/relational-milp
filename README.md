@@ -8,7 +8,7 @@ All generated/downloaded content (data fixtures, `third_party` checkouts, build
 artifacts) lives under a single base directory set by the **required**
 `RUNTIME_DIR` environment variable, so the repo base stays clean. The scripts
 and Python entrypoints fail fast if it is unset. Export it once (keep it in the
-same directory for later runs — e.g. `recreate.sh`, `verda_worker.sh`):
+same directory for later runs — e.g. `recreate.py`, `worker.py`):
 
 ```bash
 export RUNTIME_DIR="$PWD/runtime"
@@ -28,7 +28,7 @@ This provisions everything that can be automated: system build tools, a
 **Python 3.11** project `.venv` with the Python requirements, **alpha-beta-CROWN
 (`abcrown`) and `auto_LiRPA`** installed into that venv, the ReluDiff/NeuroDiff C
 verifiers (OpenBLAS + `delta_network_test`), and the ReluDiff MNIST fixtures
-under `runtime/data/reludiff_mnist/`. Afterwards `prune-experiment/recreate.sh` runs end
+under `runtime/data/reludiff_mnist/`. Afterwards `prune-experiment/recreate.py` runs end
 to end.
 
 Python 3.11 is required because the alpha-beta-CROWN / `auto_LiRPA` releases that
@@ -57,11 +57,13 @@ install; setup only detects it and prints guidance:
   `CPLEX Error 1016` on these models). (`milp_abcrown` also uses abcrown bound
   tightening, which setup installs.)
 
-`recreate.sh` runs whichever of the four verifiers are available and skips the
-rest, so a partial environment still produces results (e.g. a node without CPLEX
-runs `abcrown`, `reludiff`, and `neurodiff` and skips `milp_abcrown`). Useful
-flags: `./setup.sh --no-torch` (skip torch/abcrown, i.e. reludiff/neurodiff only)
-and `./setup.sh --skip-system` (don't touch apt).
+`prune-experiment/recreate.py` builds one command per (method, arch, mode, rate)
+cell and runs the ones whose result CSV is missing. It does **not** probe backend
+availability — a cell whose verifier is missing (e.g. `milp_abcrown` on a node
+without CPLEX) simply fails and is logged, rather than being silently skipped. On
+a mixed fleet, keep unavailable methods out of a node's run via `skip.conf`.
+Useful setup flags: `./setup.sh --no-torch` (skip torch/abcrown, i.e.
+reludiff/neurodiff only) and `./setup.sh --skip-system` (don't touch apt).
 
 ### CPLEX on a shared volume (across cluster instances)
 
