@@ -160,47 +160,11 @@ status 1 if a file is missing, malformed, or has the wrong architecture.
 
 ## Run benchmarks
 
-Run the small smoke-test suite with Pyomo, using HiGHS solver:
+The four verifiers share the same `--suite` / repeated `--suite-options KEY=VALUE`
+interface. The two suites are `pruning_mnist` and `distillation_mnist` (described
+under [Current benchmark suites](#current-benchmark-suites)).
 
-```bash
-python3 -m benchmarks.run_pyomo --suite sample --solver highs
-```
-
-Run the same suite through Pyomo, using Gurobi solver:
-
-```bash
-python3 -m benchmarks.run_pyomo --suite sample --solver gurobi
-```
-
-Tighten Pyomo ReLU pre-activation bounds with alpha-beta-CROWN before solving:
-
-```bash
-python3 -m benchmarks.run_pyomo \
-  --suite sample \
-  --solver highs \
-  --bound-tightening abcrown
-```
-
-Run the direct Gurobi encoding:
-
-```bash
-python3 -m benchmarks.run_gurobi --suite sample
-```
-
-Run alpha-beta-CROWN:
-
-```bash
-python3 -m benchmarks.run_crown --suite sample --profile relu-kfsb
-```
-
-List the available alpha-beta-CROWN profiles:
-
-```bash
-python3 -m benchmarks.run_crown --list-profiles
-```
-
-Suite-specific options are passed with repeated `--suite-options KEY=VALUE`
-arguments. For example, to run a small ReluDiff MNIST subset:
+Relational MILP with CPLEX (interval ReLU bounds):
 
 ```bash
 python3 -m benchmarks.run_pyomo \
@@ -210,6 +174,30 @@ python3 -m benchmarks.run_pyomo \
   --suite-options modes=global,three_pixel \
   --suite-options limit=3 \
   --suite-options timeout=10
+```
+
+Tighten the ReLU pre-activation bounds with alpha-beta-CROWN before solving
+(`--bound-tightening interval|abcrown`):
+
+```bash
+python3 -m benchmarks.run_pyomo \
+  --suite pruning_mnist \
+  --solver cplex \
+  --bound-tightening abcrown \
+  --suite-options networks=mnist_relu_3_100 \
+  --suite-options modes=global \
+  --suite-options limit=3
+```
+
+Run alpha-beta-CROWN on its own (`--profile` selects a named config):
+
+```bash
+python3 -m benchmarks.run_crown \
+  --suite pruning_mnist \
+  --profile relu-kfsb \
+  --suite-options networks=mnist_relu_3_100 \
+  --suite-options modes=global \
+  --suite-options limit=3
 ```
 
 Run ReluDiff / NeuroDiff (the `delta_network_test` C verifiers) on the same
@@ -236,11 +224,16 @@ network's normalization header), maps `global`/`three_pixel` onto the ASE tool's
 emits the same CSV columns as the CROWN runner plus `num_splits` and
 `tool_time_sec`. Pass `--binary` or set `DIFFVERIFIER_BINARY`.
 
-Redirect stdout to save benchmark results:
+Write the CSV results to a file with `--csv` (all runners support it):
 
 ```bash
-python3 -m benchmarks.run_pyomo --suite synthetic --solver highs > synthetic_highs.csv
-python3 summarize_out_csv.py synthetic_highs.csv
+python3 -m benchmarks.run_pyomo \
+  --suite pruning_mnist \
+  --solver cplex \
+  --suite-options networks=mnist_relu_3_100 \
+  --suite-options modes=global \
+  --suite-options limit=3 \
+  --csv results.csv
 ```
 
 ### CPLEX debug and presolve statistics
@@ -265,16 +258,6 @@ the first CPLEX presolve summary. The time is the `Presolve time` value for
 that summary, and the binary count is the number of binary columns in the
 reduced MIP. Add `--debug` to print the same structured JSON to stdout and
 `--verbose` to also print the raw CPLEX log.
-
-Save backend solver logs and per-direction wall-clock timings while keeping CSV
-results on stdout:
-
-```bash
-python3 -m benchmarks.run_pyomo \
-  --suite sample \
-  --solver highs \
-  --solver-log-dir runtime/artifacts/solver_logs/sample_highs
-```
 
 ## Current benchmark suites
 
