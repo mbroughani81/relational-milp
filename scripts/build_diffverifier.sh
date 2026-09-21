@@ -63,8 +63,16 @@ if [[ ! -f "$PREFIX/lib/libopenblas.so.0" ]]; then
 	# (libs shared) rather than the default `all`, which also runs OpenBLAS
 	# 0.3.6's self-test suite; that test driver segfaults under modern GCC/glibc
 	# and would abort the build before `make install`.
+	# Build `libs` (the .a) and `shared` (the .so) in SEPARATE make invocations.
+	# Passing both goals to one `make -j` races: the `shared` target links the
+	# .so before `libs` has finished creating libopenblas_*.a (OpenBLAS 0.3.6 has
+	# no dependency edge between them), giving "No rule to make target ...a,
+	# needed by ...so" and aborting the build. Serializing the two goals (each
+	# still parallel internally) guarantees the .a exists before .so links.
 	make -j"$(nproc)" USE_THREAD=1 NO_LAPACK=1 NOFORTRAN=1 \
-		COMMON_OPT="-O2 $WNO -Wno-implicit-int" libs shared
+		COMMON_OPT="-O2 $WNO -Wno-implicit-int" libs
+	make -j"$(nproc)" USE_THREAD=1 NO_LAPACK=1 NOFORTRAN=1 \
+		COMMON_OPT="-O2 $WNO -Wno-implicit-int" shared
 	make PREFIX="$PREFIX" NO_LAPACK=1 NOFORTRAN=1 install
 	popd >/dev/null
 	rm -rf "$workdir"
