@@ -47,10 +47,10 @@ SKIP_FILE = SCRIPT_DIR / "skip.conf"
 # ReluDiff/NeuroDiff, so cross-family comparisons are invalid. Add it back to
 # MODES only for within-family runs.
 # --------------------------------------------------------------------------- #
-METHODS = ("milp_abcrown", "abcrown", "reludiff", "neurodiff")
+METHODS = ("milp_abcrown", "reludiff", "neurodiff")
 ARCHS = ("mnist_relu_3_100", "mnist_relu_2_512", "mnist_relu_4_1024")
-MODES = ("global",)
-RATES = (5, 10, 20, 30, 40, 50)
+MODES = ("global", "three_pixel")
+RATES = (5, 20, 50)
 LIMIT = 100
 TIMEOUT = 60
 
