@@ -25,9 +25,6 @@ or later pass retries it).
 Env overrides:
   SHARED   shared-FS mount            (default /mnt/exp-data)
   RUN      run name / subdir under it (default prune-10min)
-  RECLAIM_STALE_SEC  reclaim a claimed-but-unfinished cell whose lock is older
-           than this many seconds (default 0 = never; a milp cell can
-           legitimately run for hours, so only enable this for known-dead nodes).
 """
 
 from __future__ import annotations
@@ -36,7 +33,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import signal
 import socket
 import subprocess
@@ -96,23 +92,17 @@ def link_to_shared(local_dir: Path, shared_dir: Path) -> None:
     local_dir.symlink_to(shared_dir)
 
 
-def claim(lock: Path, result: Path, reclaim_stale_sec: int) -> bool:
-    """Atomically claim a cell by creating its lock dir. True if we own it now."""
+def claim(lock: Path) -> bool:
+    """Atomically claim a cell by creating its lock dir. True if we own it now.
+
+    A lock is never taken away from its owner: one left behind by a node that
+    died looks exactly like one held by a node still working. Delete such a
+    lock by hand to make its cell eligible again.
+    """
     try:
         lock.mkdir()  # atomic on the shared FS: succeeds for exactly one node
         return True
     except FileExistsError:
-        # Already claimed. Optionally reclaim if the owner looks dead.
-        if reclaim_stale_sec > 0 and not result.exists():
-            age = time.time() - lock.stat().st_mtime
-            if age > reclaim_stale_sec:
-                print(f"reclaiming stale cell {result.stem} (lock age {int(age)}s)")
-                shutil.rmtree(lock, ignore_errors=True)
-                try:
-                    lock.mkdir()
-                    return True
-                except FileExistsError:
-                    return False
         return False
 
 
@@ -184,7 +174,6 @@ def main() -> int:
     shared = Path(os.environ.get("SHARED", "/mnt/exp-data"))
     run = os.environ.get("RUN", "prune-10min")
     out = shared / run
-    reclaim_stale_sec = int(os.environ.get("RECLAIM_STALE_SEC", "0"))
 
     if not shared.is_dir():
         sys.exit(f"ERROR: shared FS not mounted at {shared}")
@@ -227,7 +216,7 @@ def main() -> int:
         if result.exists() or skip_marker.exists():
             continue
         lock = out / "queue" / f"{tag}.lock"
-        if not claim(lock, result, reclaim_stale_sec):
+        if not claim(lock):
             continue
         (lock / "owner").write_text(
             f"{host}\t{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}\n"

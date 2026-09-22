@@ -52,7 +52,17 @@ ARCHS = ("mnist_relu_3_100", "mnist_relu_2_512", "mnist_relu_4_1024")
 MODES = ("global", "three_pixel")
 RATES = (5, 20, 50)
 LIMIT = 100
-TIMEOUT = 60
+
+# Per-instance verification budget, in seconds, held equal across methods so the
+# cross-family comparison is fair. It does NOT map 1:1 onto each runner's
+# --suite-options timeout, because the runners spend it differently:
+#   * milp_abcrown splits an instance into two independent directions
+#     (nn1_minus_nn2, nn2_minus_nn1) and hands each its own CPLEX timelimit
+#     (run_pyomo.create_solver), so its per-solve value is half the budget.
+#   * reludiff/neurodiff get one wall-clock subprocess timeout for the whole
+#     instance (run_diffverifier), so they take the full budget.
+INSTANCE_BUDGET = 600
+SOLVES_PER_INSTANCE = {"milp_abcrown": 2}
 
 # Fixed verifier parameters, held constant across the sweep.
 EPSILON = "1.0"
@@ -78,7 +88,16 @@ def iter_cells():
                     yield method, arch, mode, rate, tag_for(method, arch, mode, rate)
 
 
-def _common_opts(arch: str, mode: str, rate: int) -> list[str]:
+def timeout_for(method: str) -> int:
+    """The ``--suite-options timeout`` for ``method``, in seconds.
+
+    Divides INSTANCE_BUDGET by how many separately-timed solves the method runs
+    per instance, so every method gets the same wall-clock budget per instance.
+    """
+    return INSTANCE_BUDGET // SOLVES_PER_INSTANCE.get(method, 1)
+
+
+def _common_opts(method: str, arch: str, mode: str, rate: int) -> list[str]:
     sparsity = f"{rate / 100:.4f}"
     return [
         "--suite", "pruning_mnist",
@@ -88,14 +107,14 @@ def _common_opts(arch: str, mode: str, rate: int) -> list[str]:
         "--suite-options", f"radius={RADIUS}",
         "--suite-options", f"epsilon={EPSILON}",
         "--suite-options", f"limit={LIMIT}",
-        "--suite-options", f"timeout={TIMEOUT}",
+        "--suite-options", f"timeout={timeout_for(method)}",
     ]
 
 
 def build_command(method: str, arch: str, mode: str, rate: int, out: Path) -> list[str]:
     """Return the argv that runs one cell, writing its clean CSV to ``out``."""
     py = _python()
-    opts = _common_opts(arch, mode, rate)
+    opts = _common_opts(method, arch, mode, rate)
     if method == "milp_abcrown":
         return [py, "-m", "benchmarks.run_pyomo", *opts,
                 "--solver", "cplex", "--bound-tightening", "abcrown", "--csv", str(out)]
