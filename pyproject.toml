@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "relational-milp"
+version = "0.1.0"
+description = "Relational-MILP"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+
+# Runtime deps that live on PyPI. Two heavy dependencies are installed out of
+# band by setup.sh and are deliberately NOT listed here:
+#   * alpha-beta-CROWN (abcrown) + auto_LiRPA — installed from a pinned git
+#     checkout, no PyPI package.
+#   * full-edition CPLEX — licensed, external; `pip install cplex` is the
+#     size-capped Community Edition (see README) and must not be a dependency.
+# Install this project with `pip install -e . --no-deps` so pip never re-resolves
+# the pinned torch/abcrown that setup.sh placed in the venv.
+dependencies = [
+    "pyomo>=6.10",
+    "onnx>=1.22",
+    "highspy>=1.15",
+    "gurobipy>=12.0",
+    "torch>=2.11",
+    "torchvision>=0.26",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["nn_equivalence*", "benchmarks*", "training*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

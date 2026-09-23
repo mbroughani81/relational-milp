@@ -208,6 +208,10 @@ bound-tightening will be unavailable"
 			"torch==$TORCH_VERSION" "torchvision==$TORCHVISION_VERSION"
 		"$PY" -m pip install -r requirements.txt
 	fi
+	# Editable-install so `import benchmarks` / `nn_equivalence` resolve from any
+	# cwd. --no-deps: the pinned heavy deps above are already installed; don't let
+	# pip re-resolve (which could pull a CUDA torch build).
+	"$PY" -m pip install -e . --no-deps
 	ok "python requirements installed"
 }
 

@@ -6,15 +6,10 @@ import hashlib
 import importlib
 import io
 import json
-import sys
 import time
 import traceback
 from pathlib import Path
 from typing import Callable
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
 from torch import nn
