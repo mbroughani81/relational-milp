@@ -12,11 +12,13 @@ Shared flags live here once; anything backend-specific goes through repeatable
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from nnequiv.report import build_rows, print_progress, rows_to_csv, write_csv
 from nnequiv.run.runner import run_suite
 from nnequiv.suites import parse_suite_options
+from nnequiv.sweep.experiments import EXPERIMENT_NAMES, get_experiment
 from nnequiv.verifiers import available
 
 
@@ -69,6 +71,14 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _sweep(args: argparse.Namespace) -> int:
+    experiment = get_experiment(args.experiment)
+    if args.dry_run:
+        print(json.dumps(experiment.build_plan(), indent=2))
+        return 0
+    return experiment.run()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="nnequiv",
@@ -80,9 +90,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_run_arguments(run_parser)
 
+    sweep_parser = subparsers.add_parser(
+        "sweep", help="run an experiment grid (or print its plan with --dry-run)"
+    )
+    sweep_parser.add_argument("experiment", choices=list(EXPERIMENT_NAMES))
+    sweep_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the plan as a JSON array of {result, command} objects and exit",
+    )
+
     args = parser.parse_args(argv)
     if args.command == "run":
         raise SystemExit(_run(args))
+    if args.command == "sweep":
+        raise SystemExit(_sweep(args))
     parser.error(f"unknown command {args.command!r}")
 
 
