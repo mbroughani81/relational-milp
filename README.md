@@ -57,13 +57,34 @@ install; setup only detects it and prints guidance:
   `CPLEX Error 1016` on these models). (`milp_abcrown` also uses abcrown bound
   tightening, which setup installs.)
 
-`prune-experiment/recreate.py` builds one command per (method, arch, mode, rate)
-cell and runs the ones whose result CSV is missing. It does **not** probe backend
-availability — a cell whose verifier is missing (e.g. `milp_abcrown` on a node
-without CPLEX) simply fails and is logged, rather than being silently skipped. On
-a mixed fleet, keep unavailable methods out of a node's run via `skip.conf`.
-Useful setup flags: `./setup.sh --no-torch` (skip torch/abcrown, i.e.
-reludiff/neurodiff only) and `./setup.sh --skip-system` (don't touch apt).
+There are two sweeps, each a `<name>-experiment/recreate.py` that builds one
+command per grid cell and runs the ones whose result CSV is missing:
+
+| sweep | grid | verifiers |
+|---|---|---|
+| `prune-experiment` | (method, arch, mode, prune rate) over `pruning_mnist` | all four |
+| `distillation-experiment` | (pair, property, epsilon *or* radius) over `distillation_mnist8` | `milp_abcrown` only |
+
+Neither **probes backend availability** — a cell whose verifier is missing
+(e.g. `milp_abcrown` on a node without CPLEX) simply fails and is logged,
+rather than being silently skipped. On a mixed fleet, keep unavailable methods
+out of a node's run via that sweep's `skip.conf`. Useful setup flags:
+`./setup.sh --no-torch` (skip torch/abcrown, i.e. reludiff/neurodiff only) and
+`./setup.sh --skip-system` (don't touch apt).
+
+`scripts/worker.py` works either sweep's queue across a fleet, claiming cells
+with an atomic `mkdir` lock on the shared filesystem. `EXPERIMENT` selects
+which (default `prune`):
+
+```bash
+EXPERIMENT=distillation scripts/worker.py              # work the queue
+EXPERIMENT=distillation PROGRESS=1 scripts/worker.py   # show progress, exit
+```
+
+Each experiment gets its own shared-FS subdirectory (override with `RUN`), so
+the two sweeps never share a queue. Keep `RUN` stable across passes: the run
+directory is what lets a later pass resume unfinished cells rather than redo
+them.
 
 ### CPLEX on a shared volume (across cluster instances)
 
@@ -158,11 +179,28 @@ The checker reads the files from `runtime/data/reludiff_mnist/` by default. Use
 `--output-dir PATH` when the `.nnet` files are stored elsewhere. It exits with
 status 1 if a file is missing, malformed, or has the wrong architecture.
 
+Download the GPE paper's MNIST 8x8 teacher/student pairs and input regions
+(needed by the `distillation_mnist8` suite):
+
+```bash
+python3 scripts/download_nnequiv_benchmarks.py
+```
+
+This fetches the ONNX network pairs from `samysweb/nnequiv-experiments` and the
+literal input-region bounds from `samysweb/nnequiv`'s
+`examples/equiv/properties.py` (both at commits pinned in
+`nn_equivalence/nnequiv_benchmarks.py`), validates every architecture against
+the paper's published table, and installs `.nnet` conversions under
+`runtime/data/nnequiv_mnist8/`. `--check-only` re-validates without
+downloading; `--stats` additionally prints each pair's L-inf logit gap and
+top-1 agreement over the ten cluster centers.
+
 ## Run benchmarks
 
-The four verifiers share the same `--suite` / repeated `--suite-options KEY=VALUE`
-interface. The two suites are `pruning_mnist` and `distillation_mnist` (described
-under [Current benchmark suites](#current-benchmark-suites)).
+The verifiers share the same `--suite` / repeated `--suite-options KEY=VALUE`
+interface. The suites are `pruning_mnist`, `distillation_mnist` and
+`distillation_mnist8` (described under
+[Current benchmark suites](#current-benchmark-suites)).
 
 Relational MILP with CPLEX (interval ReLU bounds):
 
@@ -295,19 +333,9 @@ Run Relational-MILP (epsilon from each pair's `metadata.json` logit-gap stats):
 ```bash
 # Tier A fair comparison
 python3 -m benchmarks.run_pyomo \
-  --suite distillation \
+  --suite distillation_mnist \
   --solver cplex \
   --suite-options tiers=A \
-  --suite-options modes=three_pixel \
-  --suite-options epsilon=2.0 \
-  --suite-options limit=100 \
-  --suite-options timeout=30
-
-# Tier B capability stress
-python3 -m benchmarks.run_pyomo \
-  --suite distillation \
-  --solver cplex \
-  --suite-options pairs=kd_1 \
   --suite-options modes=three_pixel \
   --suite-options epsilon=2.0 \
   --suite-options limit=100 \
@@ -318,7 +346,7 @@ Run ReluDiff / NeuroDiff on Tier A only:
 
 ```bash
 python3 -m benchmarks.run_diffverifier \
-  --suite distillation \
+  --suite distillation_mnist \
   --tool neurodiff \
   --binary /path/to/delta_network_test \
   --suite-options pairs=kd_a1 \
@@ -326,6 +354,47 @@ python3 -m benchmarks.run_diffverifier \
   --suite-options epsilon=2.0 \
   --suite-options limit=100 \
   --suite-options timeout=30
+```
+
+- `distillation_mnist8`: the **GPE paper's own** MNIST 8x8 knowledge-distillation
+  pairs (Teuber et al. 2021), verified under the paper's two properties so our
+  solve times sit next to their published NNEquiv / MilpEquiv numbers
+  (Table I, Fig. 3-4). Networks are 64-input (8x8 digits on the sklearn 0..16
+  pixel scale); install them with `scripts/download_nnequiv_benchmarks.py`.
+  Supports `pairs`, `property`, `epsilon`, `radius`, `centers`, `limit`,
+  `timeout`, `data_dir`.
+
+  | property | meaning | `epsilon` means |
+  |---|---|---|
+  | `linf` | `max_i \|z1(x)_i - z2(x)_i\| <= epsilon` (their Def. 1) | the bound; default `15.0`, the paper's value |
+  | `top1` | `argmax z1(x) == argmax z2(x)` (their Def. 2) | a **strictness margin**, not an output tolerance; default `1e-4` |
+
+  The `top1` margin exists because a counterexample is a *strict* violation and
+  a MILP cannot state a strict inequality. It must stay above the solver's
+  feasibility tolerance (see `encoder_pyomo.TOP1_MIN_MARGIN`): at `0` every tie
+  point would be reported as a counterexample.
+
+  Every pair differs in architecture, so **ReluDiff / NeuroDiff cannot run this
+  suite**, and `run_crown` only encodes a single-output margin so it cannot
+  express either property — the suite is `run_pyomo` only.
+
+  Each pair is verified at the ten published cluster centers. The one
+  (pair, region, property) combination the paper reports proving carries
+  `expected_status="unsat"`, so a replication failure shows up in the results
+  CSV as `expected=unsat:no`. Each instance also records `center_linf_gap` and
+  `center_top1_agrees` — how the two networks already differ at the region's
+  center point — so the analysis can tell a genuine proof from a benchmark that
+  was never going to hold.
+
+```bash
+python3 -m benchmarks.run_pyomo \
+  --suite distillation_mnist8 \
+  --solver cplex \
+  --bound-tightening abcrown \
+  --suite-options pairs=mnist_small_top \
+  --suite-options property=top1 \
+  --suite-options limit=10 \
+  --suite-options timeout=1200
 ```
 
 Other historically documented suites (`sample`, `synthetic`, `bigger_synthetic`,

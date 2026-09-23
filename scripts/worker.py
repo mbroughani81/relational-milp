@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
-"""Fleet worker for the pruning experiment.
+"""Fleet worker for the sweep experiments.
 
-Gets the plan from ``prune-experiment/recreate.py --dry-run`` and runs each cell
-whose result CSV is missing and whose lock is unclaimed. Every node runs this
-IDENTICAL script; an atomic ``mkdir`` lock on the shared filesystem
+Gets the plan from ``<experiment>-experiment/recreate.py --dry-run`` and runs
+each cell whose result CSV is missing and whose lock is unclaimed. Every node
+runs this IDENTICAL script; an atomic ``mkdir`` lock on the shared filesystem
 self-balances the work, so scaling is just "add more nodes".
+
+``EXPERIMENT`` picks which sweep to work (default ``prune``):
+
+  prune         prune-experiment/recreate.py         (pruning_mnist, 4 verifiers)
+  distillation  distillation-experiment/recreate.py  (the GPE paper's MNIST 8x8
+                pairs under linf / top1; milp_abcrown only)
+
+Both sweeps expose the same ``--dry-run`` JSON and ``results/`` + ``logs/``
+layout, so everything below is shared.
 
 Prereqs on each node (see README + setup.sh):
   * RUNTIME_DIR exported (required; base dir for data/third_party/artifacts)
@@ -13,8 +22,9 @@ Prereqs on each node (see README + setup.sh):
   * ./setup.sh already run
 
 Usage (from repo root):
-  scripts/worker.py            # work the queue until this pass drains it
-  PROGRESS=1 scripts/worker.py # print queue progress and exit
+  scripts/worker.py                          # work the prune queue
+  EXPERIMENT=distillation scripts/worker.py  # work the distillation queue
+  PROGRESS=1 scripts/worker.py               # print queue progress and exit
 
 A cell is also abandoned early if the first TIMEOUT_PROBE_N instances all time
 out: a benchmark that hopeless on its first handful of instances will only burn
@@ -23,8 +33,9 @@ skip marker under ``$SHARED/$RUN/skipped/`` (checked before claiming, so no node
 or later pass retries it).
 
 Env overrides:
-  SHARED   shared-FS mount            (default /mnt/exp-data)
-  RUN      run name / subdir under it (default prune-10min)
+  SHARED      shared-FS mount            (default /mnt/exp-data)
+  EXPERIMENT  which sweep to work        (default prune)
+  RUN         run name / subdir under it (default: per-experiment, see RUNS)
 """
 
 from __future__ import annotations
@@ -47,7 +58,17 @@ if str(REPO_ROOT) not in sys.path:
 
 from nn_equivalence.paths import runtime_dir  # noqa: E402
 
-RECREATE = REPO_ROOT / "prune-experiment" / "recreate.py"
+EXPERIMENTS = ("prune", "distillation")
+
+# Default shared-FS subdir per experiment. "prune" keeps the historical name so
+# a fleet already working that queue is unaffected by this script gaining the
+# EXPERIMENT switch.
+RUNS = {"prune": "experiment", "distillation": "distillation"}
+
+
+def experiment_dir(experiment: str) -> Path:
+    """Repo directory holding ``experiment``'s recreate.py."""
+    return REPO_ROOT / f"{experiment}-experiment"
 
 # If the first TIMEOUT_PROBE_N instances of a cell all time out, abandon the
 # cell early (the rest of the sweep would only time out too).
@@ -59,10 +80,13 @@ TIMEOUT_PROBE_N = 10
 _PROGRESS_STATUS_RE = re.compile(r"^\[\d+/\d+\].*?\bstatus=(\S+)")
 
 
-def get_plan() -> list[dict]:
-    """Run recreate.py --dry-run and parse its JSON plan (skip.conf applied)."""
+def get_plan(experiment: str) -> list[dict]:
+    """Run the sweep's recreate.py --dry-run and parse its JSON plan."""
+    recreate = experiment_dir(experiment) / "recreate.py"
+    if not recreate.exists():
+        sys.exit(f"ERROR: no sweep runner at {recreate}")
     proc = subprocess.run(
-        [sys.executable, str(RECREATE), "--dry-run"],
+        [sys.executable, str(recreate), "--dry-run"],
         check=True,
         capture_output=True,
         text=True,
@@ -171,8 +195,18 @@ def main() -> int:
     os.chdir(REPO_ROOT)
     runtime_dir()  # fail fast if RUNTIME_DIR is unset (subprocesses inherit it)
 
+    experiment = os.environ.get("EXPERIMENT", "prune").strip()
+    if experiment not in EXPERIMENTS:
+        sys.exit(
+            f"ERROR: EXPERIMENT={experiment!r} is unknown; use one of "
+            f"{', '.join(EXPERIMENTS)}"
+        )
+
     shared = Path(os.environ.get("SHARED", "/mnt/exp-data"))
-    run = os.environ.get("RUN", "prune-10min")
+    # Per-experiment default so two sweeps never share a queue. Keep RUN stable
+    # across passes: the run dir is what lets a later pass resume unfinished
+    # cells instead of redoing them.
+    run = os.environ.get("RUN", RUNS[experiment])
     out = shared / run
 
     if not shared.is_dir():
@@ -181,10 +215,10 @@ def main() -> int:
         (out / sub).mkdir(parents=True, exist_ok=True)
 
     # Route recreate.py's results/ and logs/ onto the shared FS via symlinks.
-    link_to_shared(REPO_ROOT / "prune-experiment" / "results", out / "results")
-    link_to_shared(REPO_ROOT / "prune-experiment" / "logs", out / "logs")
+    link_to_shared(experiment_dir(experiment) / "results", out / "results")
+    link_to_shared(experiment_dir(experiment) / "logs", out / "logs")
 
-    jobs = get_plan()
+    jobs = get_plan(experiment)
 
     if os.environ.get("PROGRESS") == "1":
         total = len(jobs)
@@ -199,13 +233,13 @@ def main() -> int:
             elif (out / "queue" / f"{tag}.lock").is_dir():
                 claimed += 1
         print(
-            f"run={run}  done={done}/{total}  skipped={skipped}  "
+            f"experiment={experiment}  run={run}  done={done}/{total}  skipped={skipped}  "
             f"in-progress={claimed}  pending={total - done - skipped - claimed}"
         )
         return 0
 
     host = socket.gethostname()
-    print(f"worker {host} starting on queue {out}")
+    print(f"worker {host} starting on {experiment} queue {out}")
 
     worked = skipped = 0
     for job in jobs:

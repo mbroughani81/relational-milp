@@ -15,6 +15,12 @@ from benchmarks.common import constraints_list
 from benchmarks.common import contains
 
 WITNESS_TOLERANCE = 1e-6
+# Smallest top-1 strictness margin the encoding will accept. MILP solvers carry
+# a primal feasibility tolerance around 1e-6, so a margin at or below that is
+# met "within tolerance" by points that do not actually violate top-1
+# equivalence. Two orders of magnitude above it is still negligible next to
+# logit scales while staying safely enforceable.
+TOP1_MIN_MARGIN = 1e-4
 NetworkBounds = dict[str, list[Bounds]]
 PyomoVar = Any
 ReLUBinaryPhase = Literal["stable_active", "stable_inactive", "unstable"]
@@ -272,26 +278,89 @@ def add_network_variables(
     raise ValueError("neural network must have at least one layer")
 
 
+def output_difference_bounds(
+    first_output_bounds: Bounds,
+    second_output_bounds: Bounds,
+    output_index: int,
+) -> tuple[float, float]:
+    """Interval bounds on ``first[i] - second[i]`` from each network's own bounds."""
+    first_lower, first_upper = first_output_bounds[output_index]
+    second_lower, second_upper = second_output_bounds[output_index]
+    return first_lower - second_upper, first_upper - second_lower
+
+
 def add_output_distance_constraint(
+    model: pyo.ConcreteModel,
     constraints: IndexedConstraint,
     first_output_vars: list[PyomoVar],
     second_output_vars: list[PyomoVar],
     epsilon: float,
-    output_index: int,
-) -> None:
+    output_indices: list[int],
+    first_output_bounds: Bounds | None = None,
+    second_output_bounds: Bounds | None = None,
+) -> int:
+    """Assert that some output in ``output_indices`` violates epsilon-equivalence.
+
+    A single index is the tight constraint ``first[i] - second[i] >= epsilon``
+    and needs no binaries. Several indices need a disjunction -- the violation
+    may occur at *any* of them -- encoded with one selector binary per index:
+
+        sum_i y_i == 1
+        first[i] - second[i] >= epsilon - M_i * (1 - y_i)
+
+    where ``M_i = epsilon - min(first[i] - second[i])`` makes the constraint
+    vacuous whenever ``y_i == 0``. The big-M comes from the caller's already
+    computed per-network output bounds (interval or abcrown), so it is as tight
+    as the bound tightening in force.
+
+    Returns the number of selector binaries added.
+    """
     if epsilon < 0:
         raise ValueError("epsilon must be non-negative")
     if len(first_output_vars) != len(second_output_vars):
         raise ValueError("output variable lists must have the same length")
     if not first_output_vars:
         raise ValueError("output variable lists must be non-empty")
-    if output_index < 0 or output_index >= len(first_output_vars):
-        raise ValueError("output_index is outside the output variable range")
+    if not output_indices:
+        raise ValueError("output_indices must be non-empty")
+    for output_index in output_indices:
+        if output_index < 0 or output_index >= len(first_output_vars):
+            raise ValueError("output_index is outside the output variable range")
 
+    if len(output_indices) == 1:
+        output_index = output_indices[0]
+        add_constraint(
+            constraints,
+            first_output_vars[output_index] - second_output_vars[output_index] >= epsilon,
+        )
+        return 0
+
+    if first_output_bounds is None or second_output_bounds is None:
+        raise ValueError(
+            "output bounds are required to encode a multi-output distance "
+            "constraint (they supply the disjunction's big-M)"
+        )
+
+    selectors = pyo.Var(range(len(output_indices)), domain=pyo.Binary)
+    model.add_component("output_selector", selectors)
     add_constraint(
         constraints,
-        first_output_vars[output_index] - second_output_vars[output_index] >= epsilon,
+        sum(selectors[position] for position in range(len(output_indices))) == 1,
     )
+    for position, output_index in enumerate(output_indices):
+        difference_lower, _ = output_difference_bounds(
+            first_output_bounds,
+            second_output_bounds,
+            output_index,
+        )
+        # Never negative: epsilon >= 0 and difference_lower <= the achievable min.
+        big_m = max(0.0, epsilon - difference_lower)
+        add_constraint(
+            constraints,
+            first_output_vars[output_index] - second_output_vars[output_index]
+            >= epsilon - big_m * (1 - selectors[position]),
+        )
+    return len(output_indices)
 
 
 def encode_instance_direction(
@@ -339,14 +408,22 @@ def encode_instance_direction(
         bounds[second_network_name],
         fix_stable_relu_binaries,
     )
-    add_output_distance_constraint(
+    output_indices = instance.output_indices
+    if output_indices is None:
+        raise ValueError(
+            f"property_kind {instance.property_kind!r} is not a distance property; "
+            "encode it with encode_instance_top1 instead"
+        )
+    selector_binary_count = add_output_distance_constraint(
+        model,
         constraints,
         first_output_vars,
         second_output_vars,
         instance.epsilon,
-        instance.output_index,
+        list(output_indices),
+        first_output_bounds=bounds[first_network_name][-1],
+        second_output_bounds=bounds[second_network_name][-1],
     )
-    selector_binary_count = 0
     model.objective = pyo.Objective(expr=0.0, sense=pyo.minimize)
 
     all_binary_variables = (
@@ -374,6 +451,218 @@ def encode_instance_direction(
     )
 
 
+def add_argmax_binaries(
+    model: pyo.ConcreteModel,
+    constraints: IndexedConstraint,
+    output_vars: list[PyomoVar],
+    output_bounds: Bounds,
+    name: str,
+) -> list[PyomoVar]:
+    """Add binaries marking which output of ``output_vars`` is the maximum.
+
+    Exactly one binary is set, and setting ``selector[i]`` forces output ``i``
+    to be at least every other output. Ties are permitted: at an exact tie any
+    maximizer may be selected.
+    """
+    selectors = pyo.Var(range(len(output_vars)), domain=pyo.Binary)
+    model.add_component(name, selectors)
+    add_constraint(
+        constraints,
+        sum(selectors[index] for index in range(len(output_vars))) == 1,
+    )
+    for index in range(len(output_vars)):
+        index_lower, _ = output_bounds[index]
+        for other in range(len(output_vars)):
+            if other == index:
+                continue
+            _, other_upper = output_bounds[other]
+            big_m = max(0.0, other_upper - index_lower)
+            add_constraint(
+                constraints,
+                output_vars[index]
+                >= output_vars[other] - big_m * (1 - selectors[index]),
+            )
+    return [selectors[index] for index in range(len(output_vars))]
+
+
+def encode_instance_top1(
+    instance: Instance,
+    first_network_name: str,
+    second_network_name: str,
+    bounds: NetworkBounds,
+    fix_stable_relu_binaries: bool = True,
+) -> EncodedDirection:
+    """Encode "the two networks disagree on argmax somewhere in the region".
+
+    Unlike the epsilon properties this is a single model rather than two
+    directions. Feasible means a top-1 counterexample exists.
+
+    The condition follows Teuber et al. Section IV-A: for each output ``j``
+    they restrict to the (closed) region where the first network's output
+    ``j`` is maximal, then require the second network's ``j`` to be maximal
+    there too. So a counterexample is an ``x`` and an output ``j`` with
+
+        z1[j] maximal in z1   and   z2[m] > z2[j] for some m
+
+    -- an index the first network is willing to predict but the second
+    network strictly rules out. Note the *same* ``j`` appears on both sides.
+    Asking instead for "the two argmax selections differ" would be wrong: at
+    any point where either network ties, two different maximizers can be
+    selected, so every region containing a tie would report a counterexample.
+
+    Both networks get argmax selector binaries (ties may pick any maximizer),
+    linked by::
+
+        z2[m] - z2[j] >= margin - M * (2 - first_selector[j] - second_selector[m])
+
+    plus an integer constraint keeping the two selectors off the same output.
+
+    ``instance.epsilon`` is the strictness margin. It must be positive -- a
+    top-1 counterexample is a *strict* violation and a MILP cannot express a
+    strict inequality -- and comfortably above the solver's feasibility
+    tolerance (~1e-6), or the solver will accept near-violations; see
+    :data:`TOP1_MIN_MARGIN`. ``unsat`` then means "no point where the second
+    network beats the first network's argmax by more than the margin".
+    """
+    if instance.property_kind != "top1":
+        raise ValueError(
+            f"encode_instance_top1 requires property_kind 'top1', "
+            f"got {instance.property_kind!r}"
+        )
+    margin = instance.epsilon
+    if margin < TOP1_MIN_MARGIN:
+        raise ValueError(
+            f"top1 needs a strictness margin (Instance.epsilon) of at least "
+            f"{TOP1_MIN_MARGIN:g}, got {margin:g}. A margin of 0 makes every tie "
+            "point a counterexample, and one near the MILP feasibility tolerance "
+            "lets the solver accept near-violations as real ones."
+        )
+    model = pyo.ConcreteModel(name=f"{instance.instance_id}_top1_disagreement")
+    constraints: IndexedConstraint = IndexedConstraint(pyo.Any)
+    model.constraints = constraints
+
+    input_box = Hyperrectangle.overapproximate(instance.input_region)
+    input_vars = add_vars(model, "x", input_box.bounds())
+    add_input_region_constraints(constraints, input_vars, instance)
+
+    networks = {
+        first_network_name: instance.nn1,
+        second_network_name: instance.nn2,
+    }
+    output_vars: dict[str, list[PyomoVar]] = {}
+    network_stats: list[ReLUBinaryStats] = []
+    relu_variables: list[ReLUBinaryVariable] = []
+    for name, network in networks.items():
+        vars_, stats, variables = add_network_variables(
+            model,
+            constraints,
+            input_vars,
+            network,
+            name,
+            bounds[name],
+            fix_stable_relu_binaries,
+        )
+        output_vars[name] = vars_
+        network_stats.append(stats)
+        relu_variables.extend(variables)
+
+    first_vars = output_vars[first_network_name]
+    second_vars = output_vars[second_network_name]
+    first_bounds = bounds[first_network_name][-1]
+    second_bounds = bounds[second_network_name][-1]
+
+    first_selectors = add_argmax_binaries(
+        model, constraints, first_vars, first_bounds, "first_argmax_selector"
+    )
+    second_selectors = add_argmax_binaries(
+        model, constraints, second_vars, second_bounds, "second_argmax_selector"
+    )
+    # The two selectors must not land on the same output. Stated as an integer
+    # constraint rather than left to the big-M block below: the margin is tiny
+    # and a big-M constraint that tight is satisfied "within tolerance" by the
+    # solver's feasibility tolerance, which would admit non-counterexamples.
+    for index in range(len(first_vars)):
+        add_constraint(constraints, first_selectors[index] + second_selectors[index] <= 1)
+
+    # The second network must beat the first network's argmax by the margin.
+    for first_index in range(len(first_vars)):
+        _, first_index_upper = second_bounds[first_index]
+        for second_index in range(len(second_vars)):
+            if second_index == first_index:
+                continue
+            second_index_lower, _ = second_bounds[second_index]
+            big_m = max(0.0, margin - (second_index_lower - first_index_upper))
+            add_constraint(
+                constraints,
+                second_vars[second_index] - second_vars[first_index]
+                >= margin
+                - big_m
+                * (2 - first_selectors[first_index] - second_selectors[second_index]),
+            )
+
+    model.objective = pyo.Objective(expr=0.0, sense=pyo.minimize)
+
+    selector_binary_count = len(first_selectors) + len(second_selectors)
+    return EncodedDirection(
+        model=model,
+        input_vars=input_vars,
+        debug_stats=EncodingDebugStats(
+            direction_name="top1_disagreement",
+            network_stats=network_stats,
+            relu_binary_variables=relu_variables,
+            output_selector_binary_variables=selector_binary_count,
+            all_binary_variables=sum(
+                stats.all_binary_variables for stats in network_stats
+            )
+            + selector_binary_count,
+            unfixed_binary_variables=sum(
+                stats.unfixed_binary_variables for stats in network_stats
+            )
+            + selector_binary_count,
+        ),
+    )
+
+
+def validate_top1_witness(
+    instance: Instance,
+    input_vars: list[PyomoVar],
+) -> None:
+    """Warn when a claimed top-1 counterexample does not reproduce numerically."""
+    input_values: list[float] = []
+    for var in input_vars:
+        value = pyo.value(var)
+        if value is None:
+            raise ValueError("solver returned a witness with an uninitialized input")
+        input_values.append(float(value))
+
+    input_verified = contains(instance.input_region, input_values, WITNESS_TOLERANCE)
+    first_outputs = forward_values(instance.nn1, input_values)
+    second_outputs = forward_values(instance.nn2, input_values)
+
+    # Mirror the encoding: some output the first network calls maximal must be
+    # one the second network beats by more than the margin.
+    first_max = max(first_outputs)
+    second_max = max(second_outputs)
+    witness_margin = max(
+        (
+            second_max - second_outputs[index]
+            for index, value in enumerate(first_outputs)
+            if value >= first_max - WITNESS_TOLERANCE
+        ),
+        default=0.0,
+    )
+    target_verified = witness_margin >= instance.epsilon - WITNESS_TOLERANCE
+    if not (input_verified and target_verified):
+        print(
+            "Solver returned a feasible point, but the numeric witness did not "
+            f"verify. property=top1, nn1_argmax={first_outputs.index(first_max)}, "
+            f"nn2_argmax={second_outputs.index(second_max)}, "
+            f"witness_margin={witness_margin}, required_margin={instance.epsilon}, "
+            f"target_verified={target_verified}, input_verified={input_verified}",
+            file=sys.stderr,
+        )
+
+
 def validate_directional_witness(
     instance: Instance,
     input_vars: list[PyomoVar],
@@ -391,10 +680,18 @@ def validate_directional_witness(
     input_verified = contains(instance.input_region, input_values, WITNESS_TOLERANCE)
     first_outputs = forward_values(first_network, input_values)
     second_outputs = forward_values(second_network, input_values)
-    witness_margin = (
-        first_outputs[instance.output_index]
-        - second_outputs[instance.output_index]
+    output_indices = instance.output_indices
+    if output_indices is None:
+        raise ValueError(
+            f"property_kind {instance.property_kind!r} has no directional witness"
+        )
+    # The disjunction is satisfied as soon as one output violates epsilon, so
+    # the witness margin is the best margin over the compared outputs.
+    witness_index = max(
+        output_indices,
+        key=lambda index: first_outputs[index] - second_outputs[index],
     )
+    witness_margin = first_outputs[witness_index] - second_outputs[witness_index]
     target_verified = witness_margin >= instance.epsilon - WITNESS_TOLERANCE
     witness_verified = input_verified and target_verified
     if not witness_verified:
@@ -402,7 +699,7 @@ def validate_directional_witness(
             "Solver returned a feasible point, but the numeric witness did not "
             f"verify. direction={first_network_name}-{second_network_name}, "
             f"witness_margin={witness_margin}, required_margin={instance.epsilon}, "
-            f"output_index={instance.output_index}, "
+            f"output_index={witness_index}, "
             f"target_verified={target_verified}, input_verified={input_verified}",
             file=sys.stderr,
         )

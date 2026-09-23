@@ -8,6 +8,7 @@ import os
 import shutil
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -437,29 +438,20 @@ def direction_debug_details(
     return details
 
 
-def solve_instance_direction(
+def solve_encoded(
     instance: Instance,
+    encoded: encoder.EncodedDirection,
+    encode_runtime_sec: float,
     solver_name: SolverName,
-    first_network_name: str,
-    second_network_name: str,
-    first_network: NeuralNetwork,
-    second_network: NeuralNetwork,
     verbose: bool,
     debug: bool,
-    bounds: encoder.NetworkBounds,
-    fix_stable_relu_binaries: bool,
+    validate_witness: Callable[[list[Any]], None],
 ) -> DirectionResult:
-    encode_start = time.perf_counter()
-    encoded = encoder.encode_instance_direction(
-        instance,
-        first_network_name,
-        second_network_name,
-        first_network,
-        second_network,
-        bounds,
-        fix_stable_relu_binaries=fix_stable_relu_binaries,
-    )
-    encode_runtime_sec = time.perf_counter() - encode_start
+    """Solve one already-encoded feasibility model and classify the outcome.
+
+    Shared by the two epsilon directions and by the single symmetric top-1
+    model, so all three report identical phase timings and debug stats.
+    """
     model = encoded.model
     input_vars = encoded.input_vars
     before_presolve_stats = None
@@ -504,16 +496,9 @@ def solve_instance_direction(
 
     if status == "sat":
         model.solutions.load_from(result)
-        encoder.validate_directional_witness(
-            instance,
-            input_vars,
-            first_network_name,
-            second_network_name,
-            first_network,
-            second_network,
-        )
+        validate_witness(input_vars)
 
-    direction_name = f"{first_network_name}_minus_{second_network_name}"
+    direction_name = encoded.debug_stats.direction_name
     details: list[tuple[str, str | int | float]] = []
     if debug:
         if solver_name != "cplex":
@@ -540,6 +525,85 @@ def solve_instance_direction(
             timings=timings,
             details=details,
         ),
+    )
+
+
+def solve_instance_direction(
+    instance: Instance,
+    solver_name: SolverName,
+    first_network_name: str,
+    second_network_name: str,
+    first_network: NeuralNetwork,
+    second_network: NeuralNetwork,
+    verbose: bool,
+    debug: bool,
+    bounds: encoder.NetworkBounds,
+    fix_stable_relu_binaries: bool,
+) -> DirectionResult:
+    """Solve one direction of an epsilon property (``first - second >= eps``)."""
+    encode_start = time.perf_counter()
+    encoded = encoder.encode_instance_direction(
+        instance,
+        first_network_name,
+        second_network_name,
+        first_network,
+        second_network,
+        bounds,
+        fix_stable_relu_binaries=fix_stable_relu_binaries,
+    )
+    encode_runtime_sec = time.perf_counter() - encode_start
+
+    def validate_witness(input_vars: list[Any]) -> None:
+        encoder.validate_directional_witness(
+            instance,
+            input_vars,
+            first_network_name,
+            second_network_name,
+            first_network,
+            second_network,
+        )
+
+    return solve_encoded(
+        instance,
+        encoded,
+        encode_runtime_sec,
+        solver_name,
+        verbose,
+        debug,
+        validate_witness,
+    )
+
+
+def solve_instance_top1(
+    instance: Instance,
+    solver_name: SolverName,
+    verbose: bool,
+    debug: bool,
+    bounds: encoder.NetworkBounds,
+    fix_stable_relu_binaries: bool,
+) -> DirectionResult:
+    """Solve the single symmetric top-1 disagreement model."""
+    encode_start = time.perf_counter()
+    encoded = encoder.encode_instance_top1(
+        instance,
+        "nn1",
+        "nn2",
+        bounds,
+        fix_stable_relu_binaries=fix_stable_relu_binaries,
+    )
+    encode_runtime_sec = time.perf_counter() - encode_start
+
+    def validate_witness(input_vars: list[Any]) -> None:
+        encoder.validate_top1_witness(instance, input_vars)
+
+    return solve_encoded(
+        instance,
+        encoded,
+        encode_runtime_sec,
+        solver_name,
+        verbose,
+        debug,
+        validate_witness,
     )
 
 
@@ -570,31 +634,42 @@ def run_instance(
     )
     bounds = bound_result.bounds
 
-    first_result = solve_instance_direction(
-        instance,
-        solver_name,
-        "nn1",
-        "nn2",
-        instance.nn1,
-        instance.nn2,
-        verbose,
-        debug,
-        bounds,
-        fix_stable_relu_binaries,
+    # top-1 disagreement is symmetric, so it is one model; the epsilon
+    # properties need both directions of the difference.
+    if instance.property_kind == "top1":
+        solve_results = [
+            solve_instance_top1(
+                instance,
+                solver_name,
+                verbose,
+                debug,
+                bounds,
+                fix_stable_relu_binaries,
+            )
+        ]
+    else:
+        solve_results = [
+            solve_instance_direction(
+                instance,
+                solver_name,
+                first_name,
+                second_name,
+                first_network,
+                second_network,
+                verbose,
+                debug,
+                bounds,
+                fix_stable_relu_binaries,
+            )
+            for first_name, second_name, first_network, second_network in (
+                ("nn1", "nn2", instance.nn1, instance.nn2),
+                ("nn2", "nn1", instance.nn2, instance.nn1),
+            )
+        ]
+
+    status = combine_directional_statuses(
+        [result.status for result in solve_results]
     )
-    second_result = solve_instance_direction(
-        instance,
-        solver_name,
-        "nn2",
-        "nn1",
-        instance.nn2,
-        instance.nn1,
-        verbose,
-        debug,
-        bounds,
-        fix_stable_relu_binaries,
-    )
-    status = combine_directional_statuses([first_result.status, second_result.status])
     stats = [
         SolveStats(
             name="bound_tightening",
@@ -603,8 +678,7 @@ def run_instance(
                 ("nn2", bound_result.nn2_runtime_sec),
             ],
         ),
-        first_result.stats,
-        second_result.stats,
+        *(result.stats for result in solve_results),
     ]
 
     return InstanceResult(

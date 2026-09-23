@@ -70,14 +70,17 @@ def test_output_distance_constraint_uses_only_selected_output() -> None:
     model.first = pyo.Var(range(3))
     model.second = pyo.Var(range(3))
 
-    add_output_distance_constraint(
+    selector_count = add_output_distance_constraint(
+        model,
         model.constraints,
         [model.first[index] for index in range(3)],
         [model.second[index] for index in range(3)],
         epsilon=0.5,
-        output_index=1,
+        output_indices=[1],
     )
 
+    # A single output stays the tight one-constraint, zero-binary encoding.
+    assert selector_count == 0
     assert len(model.constraints) == 1
     expression = str(model.constraints[0].expr)
     assert "first[1]" in expression

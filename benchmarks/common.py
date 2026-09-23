@@ -11,6 +11,22 @@ from nn_equivalence.nn_types import Bounds, NeuralNetwork
 InstanceStatus = Literal["sat", "unsat", "timeout", "unknown"]
 SuiteOptions = dict[str, str]
 
+# Which equivalence property an instance asserts between nn1 and nn2:
+#   logit_class  |nn1(x)[i] - nn2(x)[i]| <= epsilon for the single output i
+#                given by ``Instance.output_index``. The repo's original
+#                property, kept as the default so existing suites are unchanged.
+#   linf         max_i |nn1(x)[i] - nn2(x)[i]| <= epsilon, over every output.
+#                Definition 1 (epsilon-equivalence) of Teuber et al. 2021.
+#   top1         argmax nn1(x) == argmax nn2(x). Definition 2 of the same paper.
+#                Has no epsilon; ``Instance.epsilon`` is a tie margin (see
+#                ``encoder_pyomo.encode_instance_top1``).
+EquivalenceProperty = Literal["logit_class", "linf", "top1"]
+EQUIVALENCE_PROPERTIES: tuple[EquivalenceProperty, ...] = (
+    "logit_class",
+    "linf",
+    "top1",
+)
+
 
 class AbstractPolytope:
     pass
@@ -102,6 +118,20 @@ class Instance:
     expected_status: InstanceStatus | None = None
     timeout_sec: float = 30.0
     metadata: dict[str, str | int | float] = field(default_factory=dict)
+    property_kind: EquivalenceProperty = "logit_class"
+
+    @property
+    def output_indices(self) -> tuple[int, ...] | None:
+        """Outputs the property compares, or ``None`` when it is not a distance.
+
+        ``logit_class`` compares one output, ``linf`` compares them all, and
+        ``top1`` compares argmaxes rather than distances.
+        """
+        if self.property_kind == "top1":
+            return None
+        if self.property_kind == "linf":
+            return tuple(range(len(self.nn1[-1][1])))
+        return (self.output_index,)
 
 
 @dataclass(frozen=True)
@@ -210,7 +240,13 @@ def parse_suite_options(raw_options: list[str] | None) -> SuiteOptions:
 
 def validate_instance(instance: Instance) -> None:
     if instance.epsilon < 0:
+        # For top1 this is the tie margin, which must also be non-negative.
         raise ValueError("epsilon must be non-negative")
+    if instance.property_kind not in EQUIVALENCE_PROPERTIES:
+        raise ValueError(
+            f"unknown property_kind {instance.property_kind!r}; "
+            f"expected one of {list(EQUIVALENCE_PROPERTIES)}"
+        )
     if not instance.nn1 or not instance.nn2:
         raise ValueError("nn1 and nn2 must each have at least one layer")
 
@@ -234,7 +270,11 @@ def validate_instance(instance: Instance) -> None:
             "nn1 and nn2 must have the same output size: "
             f"nn1={nn1_output_size}, nn2={nn2_output_size}"
         )
-    if instance.output_index < 0 or instance.output_index >= nn1_output_size:
+    # output_index only selects an output for logit_class; linf compares every
+    # output and top1 compares argmaxes, so neither reads it.
+    if instance.property_kind == "logit_class" and (
+        instance.output_index < 0 or instance.output_index >= nn1_output_size
+    ):
         raise ValueError(
             "output_index is outside the network output range: "
             f"index={instance.output_index}, output_size={nn1_output_size}"
