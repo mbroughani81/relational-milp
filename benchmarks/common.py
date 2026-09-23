@@ -1,171 +1,39 @@
+"""Backward-compat facade over the pure domain model, plus harness helpers.
+
+The domain model (Instance, polytopes, properties, results) now lives in
+:mod:`nnequiv.core`; this module re-exports it so existing ``from
+benchmarks.common import ...`` sites keep working during the migration. The
+suite-option parser and the progress/format helpers below are report/CLI
+concerns that will move to ``nnequiv.report`` / the suite loader in a later
+phase; import the domain types from :mod:`nnequiv.core` in new code.
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import json
-import math
 import sys
-from typing import Literal, TextIO
+from typing import TextIO
 
-from nn_equivalence.nn_types import Bounds, NeuralNetwork
-
-InstanceStatus = Literal["sat", "unsat", "timeout", "unknown"]
-SuiteOptions = dict[str, str]
-
-# Which equivalence property an instance asserts between nn1 and nn2:
-#   logit_class  |nn1(x)[i] - nn2(x)[i]| <= epsilon for the single output i
-#                given by ``Instance.output_index``. The repo's original
-#                property, kept as the default so existing suites are unchanged.
-#   linf         max_i |nn1(x)[i] - nn2(x)[i]| <= epsilon, over every output.
-#                Definition 1 (epsilon-equivalence) of Teuber et al. 2021.
-#   top1         argmax nn1(x) == argmax nn2(x). Definition 2 of the same paper.
-#                Has no epsilon; ``Instance.epsilon`` is a tie margin (see
-#                ``encoder_pyomo.encode_instance_top1``).
-EquivalenceProperty = Literal["logit_class", "linf", "top1"]
-EQUIVALENCE_PROPERTIES: tuple[EquivalenceProperty, ...] = (
-    "logit_class",
-    "linf",
-    "top1",
+from nnequiv.core import (
+    EQUIVALENCE_PROPERTIES,
+    AbstractPolytope,
+    Bounds,
+    EquivalenceProperty,
+    HalfSpace,
+    Hyperrectangle,
+    Instance,
+    InstanceResult,
+    InstanceStatus,
+    InstanceSuite,
+    NeuralNetwork,
+    SolveStats,
+    constraints_list,
+    contains,
+    dim,
+    validate_instance,
 )
 
-
-class AbstractPolytope:
-    pass
-
-
-@dataclass(frozen=True)
-class HalfSpace(AbstractPolytope):
-    a: list[float]
-    b: float
-
-    def validate_dimension(self, dimension: int) -> None:
-        if len(self.a) != dimension:
-            raise ValueError("halfspace dimension does not match input region")
-
-
-@dataclass(frozen=True)
-class Hyperrectangle(AbstractPolytope):
-    low: list[float]
-    high: list[float]
-
-    def bounds(self) -> Bounds:
-        if len(self.low) != len(self.high):
-            raise ValueError("lower_bounds and upper_bounds must have the same length")
-        region_bounds = list(zip(self.low, self.high))
-        for lower, upper in region_bounds:
-            if lower > upper:
-                raise ValueError("input lower bound exceeds upper bound")
-        return region_bounds
-
-    @staticmethod
-    def overapproximate(set_: AbstractPolytope) -> Hyperrectangle:
-        if isinstance(set_, Hyperrectangle):
-            return set_
-        raise TypeError(f"unsupported polytope type: {type(set_).__name__}")
-
-def constraints_list(set_: AbstractPolytope | HalfSpace) -> tuple[HalfSpace, ...]:
-    if isinstance(set_, HalfSpace):
-        return (set_,)
-    if isinstance(set_, Hyperrectangle):
-        return ()
-    raise TypeError(f"unsupported polytope type: {type(set_).__name__}")
-
-
-def dim(set_: AbstractPolytope) -> int:
-    if isinstance(set_, HalfSpace):
-        return len(set_.a)
-    if isinstance(set_, Hyperrectangle):
-        return len(set_.low)
-    raise TypeError(f"unsupported polytope type: {type(set_).__name__}")
-
-
-def contains(
-    set_: AbstractPolytope,
-    values: list[float],
-    tolerance: float = 0.0,
-) -> bool:
-    if isinstance(set_, HalfSpace):
-        value = sum(
-            coefficient * input_value
-            for coefficient, input_value in zip(set_.a, values)
-        )
-        return value <= set_.b + tolerance
-
-    if len(values) != dim(set_):
-        return False
-    if isinstance(set_, Hyperrectangle):
-        region_bounds = set_.bounds()
-        bounds_satisfied = all(
-            lower - tolerance <= value <= upper + tolerance
-            for value, (lower, upper) in zip(values, region_bounds)
-        )
-        if not bounds_satisfied:
-            return False
-    return all(
-        contains(constraint, values, tolerance)
-        for constraint in constraints_list(set_)
-    )
-
-
-@dataclass(frozen=True)
-class Instance:
-    instance_id: str
-    suite_name: str
-    nn1: NeuralNetwork
-    nn2: NeuralNetwork
-    input_region: AbstractPolytope
-    epsilon: float
-    output_index: int = 0
-    expected_status: InstanceStatus | None = None
-    timeout_sec: float = 30.0
-    metadata: dict[str, str | int | float] = field(default_factory=dict)
-    property_kind: EquivalenceProperty = "logit_class"
-
-    @property
-    def output_indices(self) -> tuple[int, ...] | None:
-        """Outputs the property compares, or ``None`` when it is not a distance.
-
-        ``logit_class`` compares one output, ``linf`` compares them all, and
-        ``top1`` compares argmaxes rather than distances.
-        """
-        if self.property_kind == "top1":
-            return None
-        if self.property_kind == "linf":
-            return tuple(range(len(self.nn1[-1][1])))
-        return (self.output_index,)
-
-
-@dataclass(frozen=True)
-class InstanceSuite:
-    name: str
-    instances: list[Instance]
-
-
-@dataclass(frozen=True)
-class SolveStats:
-    name: str
-    timings: list[tuple[str, float]] = field(default_factory=list)
-    details: list[tuple[str, str | int | float]] = field(default_factory=list)
-
-    @property
-    def measured_total_sec(self) -> float:
-        return sum(runtime_sec for _, runtime_sec in self.timings)
-
-
-@dataclass(frozen=True)
-class InstanceResult:
-    instance_id: str
-    suite_name: str
-    status: InstanceStatus
-    runtime_sec: float
-    epsilon: float
-    expected_status: InstanceStatus | None
-    stats: list[SolveStats] = field(default_factory=list)
-
-    @property
-    def matched_expected(self) -> bool | None:
-        if self.expected_status is None:
-            return None
-        return self.status == self.expected_status
+SuiteOptions = dict[str, str]
 
 
 def format_expected(result: InstanceResult) -> str:
@@ -238,44 +106,28 @@ def parse_suite_options(raw_options: list[str] | None) -> SuiteOptions:
     return options
 
 
-def validate_instance(instance: Instance) -> None:
-    if instance.epsilon < 0:
-        # For top1 this is the tie margin, which must also be non-negative.
-        raise ValueError("epsilon must be non-negative")
-    if instance.property_kind not in EQUIVALENCE_PROPERTIES:
-        raise ValueError(
-            f"unknown property_kind {instance.property_kind!r}; "
-            f"expected one of {list(EQUIVALENCE_PROPERTIES)}"
-        )
-    if not instance.nn1 or not instance.nn2:
-        raise ValueError("nn1 and nn2 must each have at least one layer")
-
-    input_dimension = dim(instance.input_region)
-    constraints_list(instance.input_region)
-    Hyperrectangle.overapproximate(instance.input_region)
-
-    nn1_input_size = len(instance.nn1[0][0][0])
-    nn2_input_size = len(instance.nn2[0][0][0])
-    if nn1_input_size != input_dimension:
-        raise ValueError("input region dimension does not match nn1 input size")
-    if nn2_input_size != input_dimension:
-        raise ValueError("input region dimension does not match nn2 input size")
-
-    # Teacher/student pairs (e.g. knowledge distillation) may have different
-    # hidden widths and depths. Only the shared input/output interface is required.
-    nn1_output_size = len(instance.nn1[-1][1])
-    nn2_output_size = len(instance.nn2[-1][1])
-    if nn1_output_size != nn2_output_size:
-        raise ValueError(
-            "nn1 and nn2 must have the same output size: "
-            f"nn1={nn1_output_size}, nn2={nn2_output_size}"
-        )
-    # output_index only selects an output for logit_class; linf compares every
-    # output and top1 compares argmaxes, so neither reads it.
-    if instance.property_kind == "logit_class" and (
-        instance.output_index < 0 or instance.output_index >= nn1_output_size
-    ):
-        raise ValueError(
-            "output_index is outside the network output range: "
-            f"index={instance.output_index}, output_size={nn1_output_size}"
-        )
+__all__ = [
+    # re-exported domain model (canonical home: nnequiv.core)
+    "AbstractPolytope",
+    "HalfSpace",
+    "Hyperrectangle",
+    "constraints_list",
+    "contains",
+    "dim",
+    "EquivalenceProperty",
+    "EQUIVALENCE_PROPERTIES",
+    "InstanceStatus",
+    "SolveStats",
+    "InstanceResult",
+    "Instance",
+    "InstanceSuite",
+    "validate_instance",
+    "Bounds",
+    "NeuralNetwork",
+    # harness helpers still living here for now
+    "SuiteOptions",
+    "format_expected",
+    "format_solve_stats",
+    "print_progress",
+    "parse_suite_options",
+]

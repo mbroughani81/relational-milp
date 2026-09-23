@@ -1,3 +1,11 @@
+"""Certified pre-activation bound tightening via alpha-beta-CROWN / auto_LiRPA.
+
+This module imports torch and auto_LiRPA at module load, so it is imported
+explicitly (and lazily, from :func:`nnequiv.bounds.api.network_bounds`) only
+when abcrown tightening is actually requested. The pure interval fallbacks live
+in :mod:`nnequiv.bounds.interval` and are reused here.
+"""
+
 from __future__ import annotations
 
 import contextlib
@@ -7,7 +15,8 @@ import sys
 import torch
 from torch import nn
 
-from nn_equivalence.nn_types import Bounds, NeuralNetwork
+from nnequiv.bounds.interval import affine_bounds, relu_bounds
+from nnequiv.core.types import Bounds, NeuralNetwork
 
 DEFAULT_BOUND_METHOD = "CROWN-Optimized"
 
@@ -34,30 +43,6 @@ class PrefixPreActivationNetwork(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
-
-
-def affine_bounds(
-    weights: list[list[float]],
-    bias: list[float],
-    input_bounds: Bounds,
-) -> Bounds:
-    output_bounds: Bounds = []
-    for row, bias_value in zip(weights, bias):
-        lower = bias_value
-        upper = bias_value
-        for weight, (input_lower, input_upper) in zip(row, input_bounds):
-            if weight >= 0:
-                lower += weight * input_lower
-                upper += weight * input_upper
-            else:
-                lower += weight * input_upper
-                upper += weight * input_lower
-        output_bounds.append((lower, upper))
-    return output_bounds
-
-
-def relu_bounds(z_bounds: Bounds) -> Bounds:
-    return [(max(0.0, lower), max(0.0, upper)) for lower, upper in z_bounds]
 
 
 def compute_layer_bounds(

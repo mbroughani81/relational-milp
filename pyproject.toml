@@ -30,7 +30,7 @@ dependencies = [
 dev = ["pytest>=8"]
 
 [tool.setuptools.packages.find]
-include = ["nn_equivalence*", "benchmarks*", "training*"]
+include = ["nnequiv*", "nn_equivalence*", "benchmarks*", "training*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

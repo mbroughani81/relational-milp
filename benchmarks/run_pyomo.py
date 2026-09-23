@@ -18,8 +18,8 @@ from pyomo.opt import TerminationCondition as TC
 from pyomo.repn import generate_standard_repn
 
 import nn_equivalence.encoder_pyomo as encoder
-from benchmarks.abcrown_bounds import compute_network_bounds
 from benchmarks.cplex_log import CplexPresolveLogStats, parse_cplex_presolve_log
+from nnequiv.bounds import network_bounds
 from benchmarks.common import (
     Hyperrectangle,
     Instance,
@@ -696,132 +696,25 @@ def run_instance(
     )
 
 
-def affine_bounds(
-    weights: list[list[float]],
-    bias: list[float],
-    input_bounds: Bounds,
-) -> Bounds:
-    output_bounds: Bounds = []
-
-    for row, bias_value in zip(weights, bias):
-        lower = bias_value
-        upper = bias_value
-        for weight, (input_lower, input_upper) in zip(row, input_bounds):
-            if weight >= 0:
-                lower += weight * input_lower
-                upper += weight * input_upper
-            else:
-                lower += weight * input_upper
-                upper += weight * input_lower
-        output_bounds.append((lower, upper))
-
-    return output_bounds
-
-
-def relu_bounds(z_bounds: Bounds) -> Bounds:
-    return [(max(0.0, lower), max(0.0, upper)) for lower, upper in z_bounds]
-
-
-def tighten_bounds(interval_bounds: Bounds, bound: Bounds | None) -> Bounds:
-    if bound is None:
-        return interval_bounds
-    if len(interval_bounds) != len(bound):
-        raise ValueError("bound length does not match interval bounds")
-
-    tightened: Bounds = []
-    for (interval_lower, interval_upper), (bound_lower, bound_upper) in zip(
-        interval_bounds,
-        bound,
-    ):
-        lower = max(interval_lower, bound_lower)
-        upper = min(interval_upper, bound_upper)
-        if lower > upper:
-            if lower - upper <= 1e-8:
-                midpoint = 0.5 * (lower + upper)
-                lower = midpoint
-                upper = midpoint
-            else:
-                raise ValueError(
-                    "bound is inconsistent with interval bounds: "
-                    f"interval=({interval_lower}, {interval_upper}), "
-                    f"bound=({bound_lower}, {bound_upper})"
-                )
-        tightened.append((lower, upper))
-    return tightened
-
-
-def compute_interval_bounds(
-    network: NeuralNetwork,
-    input_bounds: Bounds,
-    bounds: list[Bounds] | None = None,
-) -> list[Bounds]:
-    if not network:
-        raise ValueError("neural network must have at least one layer")
-    if bounds is not None and len(bounds) != len(network):
-        raise ValueError("bound layer count does not match network")
-
-    network_bounds: list[Bounds] = []
-    current_bounds = input_bounds
-    for layer_index, (weights, bias) in enumerate(network):
-        interval_z_bounds = affine_bounds(weights, bias, current_bounds)
-        bound = None if bounds is None else bounds[layer_index]
-        z_bounds = tighten_bounds(interval_z_bounds, bound)
-        network_bounds.append(z_bounds)
-        if layer_index != len(network) - 1:
-            current_bounds = relu_bounds(z_bounds)
-
-    return network_bounds
-
-
 def compute_bounds(
     instance: Instance,
     bound_tightening: BoundTighteningMode,
 ) -> BoundResult:
+    """Per-network pre-activation bounds for an instance's two networks.
+
+    Delegates the propagation to ``nnequiv.bounds.network_bounds`` (interval, or
+    abcrown-tightened) and only adds the per-network timing and the nn1/nn2
+    packaging the MILP encoding consumes.
+    """
     input_box = Hyperrectangle.overapproximate(instance.input_region)
     input_bounds: Bounds = input_box.bounds()
 
-    if bound_tightening == "interval":
-        nn1_start = time.perf_counter()
-        nn1_bounds = compute_interval_bounds(instance.nn1, input_bounds)
-        nn1_runtime_sec = time.perf_counter() - nn1_start
-
-        nn2_start = time.perf_counter()
-        nn2_bounds = compute_interval_bounds(instance.nn2, input_bounds)
-        nn2_runtime_sec = time.perf_counter() - nn2_start
-
-        return BoundResult(
-            bounds={
-                "nn1": nn1_bounds,
-                "nn2": nn2_bounds,
-            },
-            nn1_runtime_sec=nn1_runtime_sec,
-            nn2_runtime_sec=nn2_runtime_sec,
-        )
-    if bound_tightening != "abcrown":
-        raise ValueError(f"unsupported bound tightening mode: {bound_tightening}")
-
     nn1_start = time.perf_counter()
-    nn1_abcrown_bounds = compute_network_bounds(
-        instance.nn1,
-        input_bounds,
-    )
-    nn1_bounds = compute_interval_bounds(
-        instance.nn1,
-        input_bounds,
-        nn1_abcrown_bounds,
-    )
+    nn1_bounds = network_bounds(instance.nn1, input_bounds, bound_tightening)
     nn1_runtime_sec = time.perf_counter() - nn1_start
 
     nn2_start = time.perf_counter()
-    nn2_abcrown_bounds = compute_network_bounds(
-        instance.nn2,
-        input_bounds,
-    )
-    nn2_bounds = compute_interval_bounds(
-        instance.nn2,
-        input_bounds,
-        nn2_abcrown_bounds,
-    )
+    nn2_bounds = network_bounds(instance.nn2, input_bounds, bound_tightening)
     nn2_runtime_sec = time.perf_counter() - nn2_start
 
     return BoundResult(

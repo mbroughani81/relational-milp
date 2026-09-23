@@ -8,11 +8,10 @@ from typing import Literal
 import pyomo.environ as pyo
 from pyomo.core.base.constraint import IndexedConstraint
 
-from nn_equivalence.nn_types import Bounds, NeuralNetwork
-from benchmarks.common import Hyperrectangle
-from benchmarks.common import Instance
-from benchmarks.common import constraints_list
-from benchmarks.common import contains
+from nnequiv.bounds.interval import relu_bounds
+from nnequiv.core.instance import Instance
+from nnequiv.core.region import Hyperrectangle, constraints_list, contains
+from nnequiv.core.types import Bounds, NeuralNetwork
 
 WITNESS_TOLERANCE = 1e-6
 # Smallest top-1 strictness margin the encoding will accept. MILP solvers carry
@@ -63,10 +62,6 @@ class EncodedDirection:
 
 def add_constraint(constraints: IndexedConstraint, expr: Any) -> None:
     constraints.add(len(constraints), expr)
-
-
-def relu_bounds(z_bounds: Bounds) -> Bounds:
-    return [(max(0.0, lower), max(0.0, upper)) for lower, upper in z_bounds]
 
 
 def relu_binary_stats(
