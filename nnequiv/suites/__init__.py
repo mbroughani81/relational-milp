@@ -18,7 +18,7 @@ SuiteOptions = dict[str, str]
 
 
 def load_suite(name: str, options: SuiteOptions | None = None) -> InstanceSuite:
-    module = importlib.import_module(f"benchmarks.suites.{name}")
+    module = importlib.import_module(f"nnequiv.suites.{name}")
     return module.load_suite(options or {})
 
 

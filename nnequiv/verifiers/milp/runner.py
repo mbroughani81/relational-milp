@@ -17,7 +17,7 @@ import pyomo.environ as pyo
 from pyomo.opt import TerminationCondition as TC
 from pyomo.repn import generate_standard_repn
 
-import nn_equivalence.encoder_pyomo as encoder
+from nnequiv.verifiers.milp import encoder
 from nnequiv.bounds import network_bounds
 from nnequiv.core import (
     Hyperrectangle,
@@ -69,7 +69,7 @@ class CplexDebugStats:
 
 
 def load_suite(name: str, suite_options: SuiteOptions) -> InstanceSuite:
-    module = importlib.import_module(f"benchmarks.suites.{name}")
+    module = importlib.import_module(f"nnequiv.suites.{name}")
     return module.load_suite(suite_options)
 
 

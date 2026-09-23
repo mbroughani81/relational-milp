@@ -129,7 +129,7 @@ def property_id_for(instance: Instance) -> int:
 
 
 def load_suite(name: str, suite_options: SuiteOptions) -> InstanceSuite:
-    module = importlib.import_module(f"benchmarks.suites.{name}")
+    module = importlib.import_module(f"nnequiv.suites.{name}")
     return module.load_suite(suite_options)
 
 
