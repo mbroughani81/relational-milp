@@ -29,6 +29,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 
+[project.scripts]
+nnequiv = "nnequiv.run.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["nnequiv*", "nn_equivalence*", "benchmarks*", "training*"]
 

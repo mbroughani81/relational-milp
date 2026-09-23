@@ -114,7 +114,7 @@ def test_verify_delegates_to_verify_suite():
 
 
 def test_milp_verify_delegates_to_run_instance(monkeypatch):
-    import benchmarks.run_pyomo as run_pyomo
+    import nnequiv.verifiers.milp.runner as milp_runner
 
     calls = []
     sentinel = _fake_result()
@@ -127,7 +127,7 @@ def test_milp_verify_delegates_to_run_instance(monkeypatch):
         )
         return sentinel
 
-    monkeypatch.setattr(run_pyomo, "run_instance", fake_run_instance)
+    monkeypatch.setattr(milp_runner, "run_instance", fake_run_instance)
 
     verifier = MilpVerifier(
         solver="cplex",
@@ -144,7 +144,7 @@ def test_milp_verify_delegates_to_run_instance(monkeypatch):
 
 
 def test_crown_verify_suite_is_batched(monkeypatch):
-    import benchmarks.run_crown as run_crown
+    import nnequiv.verifiers.crown.runner as crown_runner
 
     calls = {"count": 0, "instances": None}
 
@@ -156,8 +156,8 @@ def test_crown_verify_suite_is_batched(monkeypatch):
         calls["instances"] = instances
         return 0, "", {i: ("safe", 0.1) for i in range(len(instances))}
 
-    monkeypatch.setattr(run_crown, "prepare_artifacts", fake_prepare)
-    monkeypatch.setattr(run_crown, "run_abcrown", fake_run_abcrown)
+    monkeypatch.setattr(crown_runner, "prepare_artifacts", fake_prepare)
+    monkeypatch.setattr(crown_runner, "run_abcrown", fake_run_abcrown)
 
     instances = [_tiny_instance(), _tiny_instance()]
     results = CrownVerifier(profile="relu-kfsb").verify_suite(instances)

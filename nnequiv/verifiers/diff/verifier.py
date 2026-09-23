@@ -39,7 +39,7 @@ class DiffVerifier(Verifier):
         if not instances:
             return []
         from nn_equivalence.paths import runtime_path
-        from benchmarks.run_diffverifier import (
+        from nnequiv.verifiers.diff.runner import (
             SUPPORTED_SUITES,
             resolve_binary,
             run_instance,

@@ -34,7 +34,7 @@ class MilpVerifier(Verifier):
         self.debug = debug
 
     def verify_suite(self, instances: list[Instance]) -> list[InstanceResult]:
-        from benchmarks.run_pyomo import run_instance
+        from nnequiv.verifiers.milp.runner import run_instance
 
         return [
             run_instance(

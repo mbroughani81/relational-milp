@@ -9,7 +9,9 @@ nnequiv.verifiers`` does not pull in torch.
 
 from __future__ import annotations
 
-from nnequiv.core import Instance, InstanceResult, InstanceSuite
+from dataclasses import replace
+
+from nnequiv.core import Instance, InstanceResult, InstanceSuite, SolveStats
 from nnequiv.verifiers.base import Verifier, VerifierOptions, parse_bool
 from nnequiv.verifiers.registry import register
 
@@ -25,15 +27,26 @@ class CrownVerifier(Verifier):
     def verify_suite(self, instances: list[Instance]) -> list[InstanceResult]:
         if not instances:
             return []
-        from benchmarks.run_crown import build_results, prepare_artifacts, run_abcrown
+        from nnequiv.verifiers.crown.runner import (
+            build_results,
+            prepare_artifacts,
+            run_abcrown,
+        )
 
         suite = InstanceSuite(name=instances[0].suite_name, instances=list(instances))
         config_path, prepared = prepare_artifacts(suite, self.profile)
         _returncode, _output, results_by_index = run_abcrown(
             config_path, prepared, self.profile, None
         )
-        results, _statuses = build_results(prepared, results_by_index)
-        return results
+        results, statuses = build_results(prepared, results_by_index)
+        # Surface abcrown's raw status as an ``extra.crown.abcrown_status`` column.
+        return [
+            replace(
+                result,
+                stats=[SolveStats(name="crown", details=[("abcrown_status", status)])],
+            )
+            for result, status in zip(results, statuses)
+        ]
 
     @classmethod
     def from_options(cls, options: VerifierOptions) -> "CrownVerifier":
