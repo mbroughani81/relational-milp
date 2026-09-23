@@ -1,5 +1,33 @@
 # Relational-MILP for neural-network equivalence
 
+A verifier-comparison harness for neural-network equivalence (Relational-MILP,
+α-β-CROWN, ReluDiff/NeuroDiff). The code lives in the self-contained `nnequiv`
+package — see [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
+
+## Command-line interface
+
+The unified entry point is the `nnequiv` console script (installed by
+`pip install -e .`):
+
+```bash
+# run one verifier over a suite (writes the unified long-format CSV)
+nnequiv run --verifier milp --suite pruning_mnist \
+  -o networks=mnist_relu_3_100 -o modes=global -o limit=3 \
+  --verifier-opt bound_tightening=abcrown --csv out.csv
+
+# print or run an experiment sweep
+nnequiv sweep prune --dry-run
+```
+
+`--verifier` is one of `milp`, `crown`, `diff`; `-o KEY=VALUE` sets suite
+options (repeatable); `--verifier-opt KEY=VALUE` sets backend options.
+
+The original per-runner commands (`python -m benchmarks.run_pyomo`,
+`run_crown`, `run_diffverifier`) still work unchanged — they keep the old flags
+and the old CSV schema, and the distributed fleet (`scripts/worker.py` +
+`*-experiment/recreate.py`) continues to use them. Everything below documents
+that interface.
+
 ## Setup
 
 ### One-shot setup (recommended)
